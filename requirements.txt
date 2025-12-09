@@ -1,0 +1,14 @@
+numpy
+pandas
+requests
+pymysql
+beautifulsoup4
+lxml
+html5lib
+schedule
+pytz
+thefuzz
+psutil
+openai>=1.0.0
+python-dotenv
+regex
