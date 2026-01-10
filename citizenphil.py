@@ -119,9 +119,11 @@ def f_sqlupdatearray(strsqltablename, arrpersoncouples, strsqlupdatecondition, i
         arrvalues = []
         for key,value in arrpersoncouples.items():
             # print(f"{key} = {value}")
-            if type(value) is int: # Handle Integers
+            if isinstance(value, bool):
+                arrvalues.append(f"{key} = {1 if value else 0}")
+            elif isinstance(value, int): # Handle Integers
                 arrvalues.append("{key} = {value}".format(key=key, value=value))
-            elif type(value) is float: # Handle floats
+            elif isinstance(value, float): # Handle floats
                 arrvalues.append("{key} = {value}".format(key=key, value=value))
             elif value is None: # Handle NULL
                 arrvalues.append("{key} = NULL".format(key=key))
@@ -313,6 +315,155 @@ def f_tmdbcontentimagesstosql(lngcontentid, strcontenttype, strsqlmastertable, s
     connectioncp.commit()
     return True
     
+def f_tmdbcontentvideosstosql(lngcontentid, strcontenttype, strsqlmastertable, strsqltablename, strkeyfieldname, strlang):
+    """
+    Fetch videos for a content from TMDb API and store them in the T_WC_TMDB_*_VIDEO table.
+    
+    Args:
+        lngcontentid (int): TMDb ID of the content
+        
+    Returns:
+        bool: True if successful, False if failed
+    """
+    global strtmdbapidomainurl
+    global headers
+    global connectioncp
+    global strsqlns
+    global paris_tz
+    
+    if lngcontentid <= 0:
+        print(f"Error: Invalid {strcontenttype} ID {lngcontentid}")
+        return False
+    
+    strtmdbapivideosurl = f"3/{strcontenttype}/{lngcontentid}/videos?language={strlang}"
+    strtmdbapifullurl = strtmdbapidomainurl + "/" + strtmdbapivideosurl
+    
+    # Add retry logic with error handling
+    intencore = True
+    intattemptsremaining = 5
+    intsuccess = False
+    
+    while intencore:
+        try:
+            response = requests.get(strtmdbapifullurl, headers=headers)
+            intencore = False
+            intsuccess = True
+        except requests.exceptions.HTTPError as http_err:
+            print(f'HTTP error occurred: {http_err}')
+        except requests.exceptions.ConnectionError as conn_err:
+            print(f'Connection error occurred: {conn_err}')
+        except requests.exceptions.Timeout as timeout_err:
+            print(f'Timeout error occurred: {timeout_err}')
+        except requests.exceptions.RequestException as req_err:
+            print(f'Request error occurred: {req_err}')
+        except Exception as err:
+            print(f'An error occurred: {err}')
+        
+        if intencore:
+            intattemptsremaining = intattemptsremaining - 1
+            if intattemptsremaining >= 0:
+                time.sleep(1)  # Wait for 1 second before next request
+            else:
+                intencore = False
+    
+    if not intsuccess:
+        print(f"f_tmdbcontentvideosstosql({lngcontentid}, {strlang}) failed!")
+        return False
+    
+    data = response.json()
+    if 'status_code' in data and data['status_code'] > 1:
+        print(f"Error: API returned status code {data['status_code']}")
+        if 'status_message' in data:
+            print(f"Status message: {data['status_message']}")
+        return False
+    
+    # Get current timestamp for database records
+    current_time = datetime.now(paris_tz).strftime("%Y-%m-%d %H:%M:%S")
+    current_date = datetime.now(paris_tz).strftime("%Y-%m-%d")
+    
+    # Track all video ids to clean up obsolete ones later
+    all_video_ids = []
+    
+    lngdisplayorder = 0
+    if 'results' in data and data['results']:
+        for video in data['results']:
+            lngdisplayorder += 1
+            
+            # Extract video data
+            video_id = video.get('id', '')
+            if not video_id:
+                continue
+                
+            all_video_ids.append(video_id)
+            
+            # Parse published_at datetime if available
+            dat_published = None
+            published_at_str = video.get('published_at')
+            if published_at_str:
+                try:
+                    # Handle common TMDb ISO 8601 format with trailing 'Z'
+                    if published_at_str.endswith('Z'):
+                        dt_utc = datetime.strptime(published_at_str, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=pytz.utc)
+                    else:
+                        dt_utc = datetime.fromisoformat(published_at_str)
+                        if dt_utc.tzinfo is None:
+                            dt_utc = dt_utc.replace(tzinfo=pytz.utc)
+                    dt_local = dt_utc.astimezone(paris_tz)
+                    dat_published = dt_local.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    dat_published = None
+
+            # Prepare data for database
+            arrvideodata = {
+                strkeyfieldname: lngcontentid,
+                "DISPLAY_ORDER": lngdisplayorder,
+                "DAT_CREAT": current_date,
+                "TIM_UPDATED": current_time,
+                "DAT_PUBLISHED": dat_published,
+                "VIDEO_TYPE": video.get('type', ''),
+                "LANG": video.get('iso_639_1', ''),
+                "COUNTRY_CODE": video.get('iso_3166_1', ''),
+                "ID_CREDIT": video_id,
+                "VIDEO_KEY": video.get('key', ''),
+                "VIDEO_NAME": video.get('name', ''),
+                "VIDEO_SITE": video.get('site', ''),
+                "QUALITY": video.get('size', 0),
+                "QUALITY_TEXT": str(video.get('size', 0)) + 'p',
+                "OFFICIAL": video.get('official', False)
+            }
+            #print(arrvideodata)
+            # Update or insert into database
+            strsqlupdatecondition = f"{strkeyfieldname} = {lngcontentid} AND LANG = '{strlang}' AND ID_CREDIT = '{video_id}'"
+            #print(strsqlupdatecondition)
+            f_sqlupdatearray(strsqltablename, arrvideodata, strsqlupdatecondition, 1)
+    
+    # Clean up obsolete videos
+    if all_video_ids:
+        # Create a comma-separated list of video ids with quotes
+        video_ids_list = "'" + "', '".join(all_video_ids) + "'"
+        
+        # Delete videos that are no longer present in the API response
+        strsqldelete = f"DELETE FROM {strsqltablename} WHERE {strkeyfieldname} = {lngcontentid} AND LANG = '{strlang}' AND ID_CREDIT NOT IN ({video_ids_list})"
+        cursor = connectioncp.cursor()
+        cursor.execute(strsqldelete)
+        connectioncp.commit()
+    else:
+        # If no videos were found, delete all videos for this content and language 
+        strsqldelete = f"DELETE FROM {strsqltablename} WHERE {strkeyfieldname} = {lngcontentid} AND LANG = '{strlang}'"
+        cursor = connectioncp.cursor()
+        cursor.execute(strsqldelete)
+        connectioncp.commit()
+    
+    # Update the content record to mark videos as completed
+    strtimvideoscompleted = current_time
+    strsqlupdatecondition = f"{strkeyfieldname} = {lngcontentid}"
+    strsqlupdatesetclause = f"TIM_VIDEOS_COMPLETED = '{strtimvideoscompleted}'"
+    strsqlupdate = f"UPDATE {strsqlmastertable} SET {strsqlupdatesetclause} WHERE {strsqlupdatecondition};"
+    cursor = connectioncp.cursor()
+    cursor.execute(strsqlupdate)
+    connectioncp.commit()
+    return True
+
 # https://developer.themoviedb.org/reference/person-details
 
 def f_tmdbpersontosql(lngpersonid):
@@ -391,6 +542,10 @@ def f_tmdbpersontosql(lngpersonid):
                 strpersonname = data['name']
                 strpersonplaceofbirth = str(data['place_of_birth'])
                 strpersonplaceofbirth = strpersonplaceofbirth.strip()
+                if strpersonplaceofbirth: 
+                    if len(strpersonplaceofbirth) > 200:
+                        # If place of birth is too long, we chop it
+                        strpersonplaceofbirth = strpersonplaceofbirth[:200]
                 dblpersonpopularity = data['popularity']
                 strpersonknownfordepartment = data['known_for_department']
                 boopersonadult = data['adult']
@@ -635,6 +790,20 @@ def f_tmdbpersonsetcreditscompleted(lngpersonid):
         strsqlupdatecondition = f"ID_PERSON = {lngpersonid}"
         strtimcreditscompleted = datetime.now(paris_tz).strftime("%Y-%m-%d %H:%M:%S")
         strsqlupdatesetclause = f"TIM_CREDITS_COMPLETED = '{strtimcreditscompleted}', TIM_UPDATED = '{strtimcreditscompleted}'"
+        strsqlupdate = f"UPDATE {strsqltablename} SET {strsqlupdatesetclause} WHERE {strsqlupdatecondition};"
+        cursor2.execute(strsqlupdate)
+        connectioncp.commit()
+
+def f_tmdbpersonsetwikidatacompleted(lngpersonid):
+    global paris_tz
+    global connectioncp
+    
+    if lngpersonid > 0:
+        cursor2 = connectioncp.cursor()
+        strsqltablename = "T_WC_TMDB_PERSON"
+        strsqlupdatecondition = f"ID_PERSON = {lngpersonid}"
+        strtimwikidatacompleted = datetime.now(paris_tz).strftime("%Y-%m-%d %H:%M:%S")
+        strsqlupdatesetclause = f"TIM_WIKIDATA_COMPLETED = '{strtimwikidatacompleted}'"
         strsqlupdate = f"UPDATE {strsqltablename} SET {strsqlupdatesetclause} WHERE {strsqlupdatecondition};"
         cursor2.execute(strsqlupdate)
         connectioncp.commit()
@@ -1282,6 +1451,12 @@ def f_tmdbmoviedelete(lngmovieid):
         cursor2.execute(strsqlupdate)
         connectioncp.commit()
         
+        strsqltablename = "T_WC_TMDB_MOVIE_VIDEO"
+        strsqlupdatecondition = f"ID_MOVIE = {lngmovieid}"
+        strsqlupdate = f"DELETE FROM {strsqltablename} WHERE {strsqlupdatecondition};"
+        cursor2.execute(strsqlupdate)
+        connectioncp.commit()
+        
         strsqltablename = "T_WC_TMDB_PERSON_MOVIE"
         strsqlupdatecondition = f"ID_MOVIE = {lngmovieid}"
         strsqlupdate = f"DELETE FROM {strsqltablename} WHERE {strsqlupdatecondition};"
@@ -1347,6 +1522,9 @@ def f_tmdbmoviesetwikipediacompleted(lngmovieid):
 def f_tmdbmovieimagestosql(lngmovieid):
     f_tmdbcontentimagesstosql(lngmovieid, "movie", "T_WC_TMDB_MOVIE", "T_WC_TMDB_MOVIE_IMAGE", "ID_MOVIE")
     
+def f_tmdbmovievideotosql(lngmovieid, strlang):
+    f_tmdbcontentvideosstosql(lngmovieid, "movie", "T_WC_TMDB_MOVIE", "T_WC_TMDB_MOVIE_VIDEO", "ID_MOVIE", strlang)
+    
 def f_tmdbmovietosqleverything(lngmovieid):
     f_tmdbmovietosql(lngmovieid)
     f_tmdbmovielangtosql(lngmovieid,'fr')
@@ -1354,6 +1532,8 @@ def f_tmdbmovietosqleverything(lngmovieid):
     f_tmdbmoviekeywordstosql(lngmovieid)
     f_tmdbmoviesetkeywordscompleted(lngmovieid)
     f_tmdbmovieimagestosql(lngmovieid)
+    f_tmdbmovievideotosql(lngmovieid,'en')
+    f_tmdbmovievideotosql(lngmovieid,'fr')
 
 # https://developer.themoviedb.org/reference/tv-series-details
 
@@ -1831,13 +2011,14 @@ def f_tmdbserietosql(lngserieid):
                 processed_creator_ids = set()
                 
                 # Check which creators were already processed during credit processing
-                for intcredittype, strseriecreditcredittype in arrcredittype.items():
-                    if strseriecreditcredittype in data['credits']:
-                        for onecontent in data['credits'][strseriecreditcredittype]:
-                            lngpersonid = onecontent['id']
-                            for creator in arrcreatedby:
-                                if creator['id'] == lngpersonid:
-                                    processed_creator_ids.add(lngpersonid)
+                if 'credits' in data:
+                    for intcredittype, strseriecreditcredittype in arrcredittype.items():
+                        if strseriecreditcredittype in data['credits']:
+                            for onecontent in data['credits'][strseriecreditcredittype]:
+                                lngpersonid = onecontent['id']
+                                for creator in arrcreatedby:
+                                    if creator['id'] == lngpersonid:
+                                        processed_creator_ids.add(lngpersonid)
                 
                 # Add any creators that weren't processed
                 for creator in arrcreatedby:
@@ -2079,6 +2260,12 @@ def f_tmdbseriedelete(lngserieid):
         cursor2.execute(strsqlupdate)
         connectioncp.commit()
         
+        strsqltablename = "T_WC_TMDB_SERIE_VIDEO"
+        strsqlupdatecondition = f"ID_SERIE = {lngserieid}"
+        strsqlupdate = f"DELETE FROM {strsqltablename} WHERE {strsqlupdatecondition};"
+        cursor2.execute(strsqlupdate)
+        connectioncp.commit()
+        
         strsqltablename = "T_WC_TMDB_PERSON_SERIE"
         strsqlupdatecondition = f"ID_SERIE = {lngserieid}"
         strsqlupdate = f"DELETE FROM {strsqltablename} WHERE {strsqlupdatecondition};"
@@ -2144,6 +2331,9 @@ def f_tmdbseriesetwikipediacompleted(lngserieid):
 def f_tmdbserieimagestosql(lngserieid):
     f_tmdbcontentimagesstosql(lngserieid, "tv", "T_WC_TMDB_SERIE", "T_WC_TMDB_SERIE_IMAGE", "ID_SERIE")
     
+def f_tmdbserievideotosql(lngserieid, strlang):
+    f_tmdbcontentvideosstosql(lngserieid, "tv", "T_WC_TMDB_SERIE", "T_WC_TMDB_SERIE_VIDEO", "ID_SERIE", strlang)
+    
 def f_tmdbserietosqleverything(lngserieid):
     f_tmdbserietosql(lngserieid)
     f_tmdbserielangtosql(lngserieid,'fr')
@@ -2151,6 +2341,8 @@ def f_tmdbserietosqleverything(lngserieid):
     f_tmdbseriekeywordstosql(lngserieid)
     f_tmdbseriesetkeywordscompleted(lngserieid)
     f_tmdbserieimagestosql(lngserieid)
+    f_tmdbserievideotosql(lngserieid,'en')
+    f_tmdbserievideotosql(lngserieid,'fr')
 
 # https://developer.themoviedb.org/reference/collection-details
 

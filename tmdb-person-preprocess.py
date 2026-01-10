@@ -27,6 +27,7 @@ def check_memory():
 # Global lookup dictionary that will be populated once and used for all lookups
 country_lookup_dict: Dict[str, str] = {}
 is_initialized: bool = False
+#intaskllm: bool = True
 intaskllm: bool = False
 
 def normalize_string(s: str) -> str:
