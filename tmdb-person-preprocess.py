@@ -12,7 +12,7 @@ import pandas as pd
 import psutil
 import re
 import sys
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Set
 
 def check_memory():
     """Check and display system memory information"""
@@ -428,6 +428,66 @@ def process_value(val, is_integer=False):
     
     return val_str
 
+def _contains_any_in_ranges(s: str, ranges: List[range]) -> bool:
+    for ch in s:
+        cp_ = ord(ch)
+        for r in ranges:
+            if cp_ in r:
+                return True
+    return False
+
+def guess_language_family(person_name: str) -> str:
+    if not person_name:
+        return ""
+
+    s = person_name.strip()
+    if not s:
+        return ""
+
+    # Unicode blocks (approx.)
+    hangul_ranges = [range(0xAC00, 0xD7B0), range(0x1100, 0x1200), range(0x3130, 0x3190)]
+    hiragana_katakana_ranges = [range(0x3040, 0x30A0), range(0x30A0, 0x3100), range(0x31F0, 0x3200)]
+    han_ranges = [range(0x4E00, 0xA000), range(0x3400, 0x4DC0)]
+    cyrillic_ranges = [range(0x0400, 0x0530), range(0x2DE0, 0x2E00), range(0xA640, 0xA6A0)]
+    arabic_ranges = [range(0x0600, 0x0700), range(0x0750, 0x0780), range(0x08A0, 0x0900)]
+    hebrew_ranges = [range(0x0590, 0x0600)]
+
+    has_hangul = _contains_any_in_ranges(s, hangul_ranges)
+    has_kana = _contains_any_in_ranges(s, hiragana_katakana_ranges)
+    has_han = _contains_any_in_ranges(s, han_ranges)
+    has_cyrillic = _contains_any_in_ranges(s, cyrillic_ranges)
+    has_arabic = _contains_any_in_ranges(s, arabic_ranges)
+    has_hebrew = _contains_any_in_ranges(s, hebrew_ranges)
+
+    if has_hangul:
+        return "Hangul"
+    if has_kana:
+        return "Japanese"
+    if has_han:
+        return "Chinese"
+    if has_cyrillic:
+        return "Cyrillic"
+    if has_arabic:
+        return "Arabic"
+    if has_hebrew:
+        return "Hebrew"
+    return "Latin"
+
+def split_also_known_as(value: Optional[str]) -> List[str]:
+    if not value:
+        return []
+    parts = [p.strip() for p in str(value).split('|')]
+    parts = [p for p in parts if p]
+
+    # Deduplicate while preserving order
+    seen: Set[str] = set()
+    out: List[str] = []
+    for p in parts:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
 def batch_update_data_country_of_birth(connection, df, batch_size=1000):
     """Update data in batches to improve performance"""
     try:
@@ -517,7 +577,8 @@ try:
             strtotalruntime = ""
             cp.f_setservervariable("strtmdbpersonpreprocesstotalruntime",strtotalruntime,strtotalruntimedesc,0)
             
-            arrprocessscope = {1: 'COUNTRY_OF_BIRTH'}
+            arrprocessscope = {1: 'COUNTRY_OF_BIRTH', 2: 'ALSO_KNOWN_AS'}
+            #arrprocessscope = {2: 'ALSO_KNOWN_AS'}
             for intindex, strdesc in arrprocessscope.items():
                 strprocessesexecuted += str(intindex) + ", "
                 cp.f_setservervariable("strtmdbpersonpreprocessprocessesexecuted",strprocessesexecuted,strprocessesexecuteddesc,0)
@@ -596,6 +657,122 @@ ORDER BY ID_PERSON ASC
                         print(f"Error processing data: {e}")
                     finally:
                         print("PLACE_OF_BIRTH parsing done")
+                if intindex == 2:
+                    #----------------------------------------------------
+                    print("ALSO_KNOWN_AS processing")
+                    try:
+                        cursor2.execute("SELECT ID_PERSON, ALSO_KNOWN_AS FROM T_WC_TMDB_PERSON ORDER BY ID_PERSON ASC ")
+
+                        lng_persons_processed = 0
+                        lng_aliases_upserted = 0
+                        lng_aliases_deleted = 0
+
+                        while True:
+                            rows = cursor2.fetchmany(1000)
+                            if not rows:
+                                break
+
+                            for row in rows:
+                                lng_persons_processed += 1
+                                id_person = row['ID_PERSON']
+                                aliases = split_also_known_as(row.get('ALSO_KNOWN_AS'))
+
+                                cursor_existing = cp.connectioncp.cursor()
+                                cursor_existing.execute(
+                                    "SELECT ID_ROW, PERSON_NAME FROM T_WC_TMDB_PERSON_ALSO_KNOWN_AS WHERE ID_PERSON = %s ORDER BY ID_ROW ASC",
+                                    (id_person,)
+                                )
+                                existing_rows = cursor_existing.fetchall()
+                                cursor_existing.close()
+
+                                existing_by_name = {}
+                                for r in existing_rows:
+                                    if not r.get('PERSON_NAME'):
+                                        continue
+                                    name = r['PERSON_NAME']
+                                    if name not in existing_by_name:
+                                        existing_by_name[name] = r['ID_ROW']
+
+                                if not aliases:
+                                    cursor_delete = cp.connectioncp.cursor()
+                                    cursor_delete.execute(
+                                        "DELETE FROM T_WC_TMDB_PERSON_ALSO_KNOWN_AS WHERE ID_PERSON = %s",
+                                        (id_person,)
+                                    )
+                                    lng_aliases_deleted += cursor_delete.rowcount
+                                    cursor_delete.close()
+                                    continue
+
+                                # Upsert current aliases
+                                for idx, alias in enumerate(aliases, start=1):
+                                    alias_db = alias[:200]
+                                    language_family = guess_language_family(alias_db)
+
+                                    if alias_db in existing_by_name:
+                                        id_row = existing_by_name[alias_db]
+                                        cp.f_sqlupdatearray(
+                                            "T_WC_TMDB_PERSON_ALSO_KNOWN_AS",
+                                            {
+                                                "ID_PERSON": id_person,
+                                                "PERSON_NAME": alias_db,
+                                                "LANGUAGE_FAMILY": language_family,
+                                                "DISPLAY_ORDER": idx,
+                                            },
+                                            f"ID_ROW = {id_row}",
+                                            1
+                                        )
+                                    else:
+                                        cp.f_sqlupdatearray(
+                                            "T_WC_TMDB_PERSON_ALSO_KNOWN_AS",
+                                            {
+                                                "ID_PERSON": id_person,
+                                                "PERSON_NAME": alias_db,
+                                                "LANGUAGE_FAMILY": language_family,
+                                                "DISPLAY_ORDER": idx,
+                                            },
+                                            f"ID_PERSON = {id_person} AND PERSON_NAME = {cp.f_stringtosql(alias_db)}",
+                                            1
+                                        )
+                                    lng_aliases_upserted += 1
+
+                                # Mark stale aliases deleted
+                                current_set = set(a[:200] for a in aliases)
+                                for existing_name, id_row in existing_by_name.items():
+                                    if existing_name not in current_set:
+                                        cursor_delete = cp.connectioncp.cursor()
+                                        cursor_delete.execute(
+                                            "DELETE FROM T_WC_TMDB_PERSON_ALSO_KNOWN_AS WHERE ID_ROW = %s",
+                                            (id_row,)
+                                        )
+                                        lng_aliases_deleted += cursor_delete.rowcount
+                                        cursor_delete.close()
+
+                            cp.connectioncp.commit()
+
+                        cp.f_setservervariable(
+                            "strtmdbpersonpreprocessalsoknownaspersons",
+                            str(lng_persons_processed),
+                            "Count of persons processed for ALSO_KNOWN_AS",
+                            0
+                        )
+                        cp.f_setservervariable(
+                            "strtmdbpersonpreprocessalsoknownasupserted",
+                            str(lng_aliases_upserted),
+                            "Count of ALSO_KNOWN_AS aliases upserted",
+                            0
+                        )
+                        cp.f_setservervariable(
+                            "strtmdbpersonpreprocessalsoknownasdeleted",
+                            str(lng_aliases_deleted),
+                            "Count of ALSO_KNOWN_AS aliases deleted",
+                            0
+                        )
+                    except pymysql.MySQLError as e:
+                        print(f"Database error: {e}")
+                    except Exception as e:
+                        print(f"Error processing ALSO_KNOWN_AS: {e}")
+                    finally:
+                        print("ALSO_KNOWN_AS processing done")
             print("------------------------------------------")
             strcurrentprocess = ""
             cp.f_setservervariable("strtmdbpersonpreprocesscurrentprocess",strcurrentprocess,"Current process in the TMDb database preprocess",0)
