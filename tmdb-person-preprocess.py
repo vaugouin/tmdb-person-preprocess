@@ -542,6 +542,25 @@ def split_also_known_as(value: Optional[str]) -> List[str]:
             out.append(p)
     return out
 
+def build_person_names(name: Optional[str], also_known_as: Optional[str]) -> List[str]:
+    names: List[str] = []
+
+    if name:
+        primary_name = str(name).strip()
+        if primary_name:
+            names.append(primary_name)
+
+    names.extend(split_also_known_as(also_known_as))
+
+    # Deduplicate while preserving order, with NAME always first if present.
+    seen: Set[str] = set()
+    out: List[str] = []
+    for person_name in names:
+        if person_name not in seen:
+            seen.add(person_name)
+            out.append(person_name)
+    return out
+
 def batch_update_data_country_of_birth(connection, df, batch_size=1000):
     """Update data in batches to improve performance"""
     try:
@@ -716,7 +735,7 @@ ORDER BY ID_PERSON ASC
                     #----------------------------------------------------
                     print("ALSO_KNOWN_AS processing")
                     try:
-                        cursor2.execute("SELECT ID_PERSON, ALSO_KNOWN_AS FROM T_WC_TMDB_PERSON ORDER BY ID_PERSON ASC ")
+                        cursor2.execute("SELECT ID_PERSON, NAME, ALSO_KNOWN_AS FROM T_WC_TMDB_PERSON ORDER BY ID_PERSON ASC ")
 
                         lng_persons_processed = 0
                         lng_aliases_upserted = 0
@@ -730,7 +749,7 @@ ORDER BY ID_PERSON ASC
                             for row in rows:
                                 lng_persons_processed += 1
                                 id_person = row['ID_PERSON']
-                                aliases = split_also_known_as(row.get('ALSO_KNOWN_AS'))
+                                aliases = build_person_names(row.get('NAME'), row.get('ALSO_KNOWN_AS'))
 
                                 cursor_existing = cp.connectioncp.cursor()
                                 cursor_existing.execute(
@@ -846,4 +865,3 @@ ORDER BY ID_PERSON ASC
 except pymysql.MySQLError as e:
     print(f"❌ MySQL Error: {e}")
     cp.connectioncp.rollback()
-
