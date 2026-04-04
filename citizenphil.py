@@ -6,36 +6,63 @@ import pymysql.cursors
 #import re
 from datetime import datetime
 import pytz
+import os
+from pathlib import Path
+from dotenv import load_dotenv
 
-# Global variable declaration
-global connectioncp
-global cursor
+load_dotenv(Path(__file__).resolve().with_name(".env"))
 
-# Database connectioncp parameters
-global strdbhost
-global lngdbport
-global strdbuser
-global strdbpassword
-global strdbname
+strdbhost = os.environ.get("DB_HOST", "")
+lngdbport = int(os.environ.get("DB_PORT", "3306"))
+strdbuser = os.environ.get("DB_USER", "")
+strdbpassword = os.environ.get("DB_PASSWORD", "")
+strdbname = os.environ.get("DB_NAME", "")
+strsqlns = os.environ.get("DB_NAMESPACE", "")
+strtmdbapidomainurl = os.environ.get("TMDB_API_DOMAIN_URL", "")
+strtmdbapikey = os.environ.get("TMDB_API_KEY", "")
+strtmdbapitoken = os.environ.get("TMDB_API_TOKEN", "")
 
-import citizenphilsecrets as cps
-strdbhost = cps.strdbhost
-lngdbport = cps.lngdbport
-strdbuser = cps.strdbuser
-strdbpassword = cps.strdbpassword
-strdbname = cps.strdbname
-strsqlns = cps.strsqlns
-strtmdbapidomainurl = cps.strtmdbapidomainurl
-strtmdbapikey = cps.strtmdbapikey
-strtmdbapitoken = cps.strtmdbapitoken
+headers = {
+    "accept": "application/json",
+    "Authorization": "Bearer " + strtmdbapitoken
+}
 
 lnguseridsession = 1
 strlanguagecountry = "en-US"
 strlanguage = "en"
 
-connectioncp = pymysql.connect(host=strdbhost, port=lngdbport, user=strdbuser, password=strdbpassword, database=strdbname, cursorclass=pymysql.cursors.DictCursor)
+connectioncp = None
 
-paris_tz = pytz.timezone(cps.strusertimezone)
+paris_tz = pytz.timezone(os.environ.get("USER_TIMEZONE", "Europe/Paris"))
+
+def f_getconnection():
+    """
+    Get the active MariaDB connection, creating it lazily if needed.
+
+    Returns:
+    --------
+    pymysql.connections.Connection
+        An open PyMySQL connection configured with the database settings
+        loaded from the environment.
+
+    Behavior:
+    ---------
+    - Reuses the module-level `connectioncp` if it already exists and is open.
+    - Opens a new connection only when no connection exists or the current one
+      is closed.
+    """
+    global connectioncp
+    
+    if connectioncp is None or not getattr(connectioncp, "open", False):
+        connectioncp = pymysql.connect(
+            host=strdbhost,
+            port=lngdbport,
+            user=strdbuser,
+            password=strdbpassword,
+            database=strdbname,
+            cursorclass=pymysql.cursors.DictCursor,
+        )
+    return connectioncp
 
 def f_sqlupdatearray(strsqltablename, arrpersoncouples, strsqlupdatecondition, intaddstdfields):
     """
@@ -70,9 +97,9 @@ def f_sqlupdatearray(strsqltablename, arrpersoncouples, strsqlupdatecondition, i
     - Handles different data types (int, float, None/NULL, strings) appropriately
     - Commits transaction on success, rolls back on MySQL errors
     """
-    global connectioncp
     global paris_tz
     
+    connectioncp = f_getconnection()
     cursor2 = connectioncp.cursor()
     if intaddstdfields == 1:
         if "TIM_UPDATED" not in arrpersoncouples:
@@ -146,9 +173,25 @@ def f_sqlupdatearray(strsqltablename, arrpersoncouples, strsqlupdatecondition, i
 # Server variables functions
 
 def f_getservervariable(strvarname,lnglang=0):
+    """
+    Retrieve the value of a server variable from the database.
+
+    Parameters:
+    -----------
+    strvarname : str
+        The name of the server variable to retrieve
+    lnglang : int, optional
+        Language ID filter. If > 0, only retrieves the variable for that specific language.
+        Default is 0 (no language filter).
+
+    Returns:
+    --------
+    str
+        The value of the server variable, or empty string if not found.
+    """
     global strsqlns
-    global connectioncp
     
+    connectioncp = f_getconnection()
     cursor2 = connectioncp.cursor()
     strresult = ""
     strsqlselect = "SELECT VAR_VALUE FROM " + strsqlns + "SERVER_VARIABLE WHERE DELETED = 0 AND VAR_NAME = " + f_stringtosql(strvarname)
@@ -163,6 +206,24 @@ def f_getservervariable(strvarname,lnglang=0):
     return strresult
     
 def f_setservervariable(strvarname,strvarvalue,strvardesc="",lnglang=0):
+    """
+    Set or update a server variable in the database.
+
+    Parameters:
+    -----------
+    strvarname : str
+        The name of the server variable to set
+    strvarvalue : str
+        The value to assign to the server variable
+    strvardesc : str, optional
+        A long description of the variable's purpose. Default is empty string.
+    lnglang : int, optional
+        Language ID for the variable. Default is 0 (no specific language).
+
+    Returns:
+    --------
+    None
+    """
     global strsqlns
     
     arrcouples = {}
@@ -177,7 +238,20 @@ def f_setservervariable(strvarname,strvarvalue,strvardesc="",lnglang=0):
     f_sqlupdatearray(strsqltablename,arrcouples,strsqlupdatecondition,1)
 
 def convert_seconds_to_duration(seconds):
-    """Convert seconds to a readable format: days, hours, minutes, seconds"""
+    """
+    Convert seconds to a human-readable duration format.
+
+    Parameters:
+    -----------
+    seconds : int
+        The number of seconds to convert
+
+    Returns:
+    --------
+    str
+        A formatted string like "2 days, 3 hours, 15 minutes, 30 seconds".
+        Returns "Invalid duration (negative seconds)" if input is negative.
+    """
     if seconds < 0:
         return "Invalid duration (negative seconds)"
     
@@ -199,5 +273,127 @@ def convert_seconds_to_duration(seconds):
     return ", ".join(parts)
 
 def f_stringtosql(strtext):
+    """
+    Escape a string for safe use in SQL queries.
+
+    Parameters:
+    -----------
+    strtext : str
+        The text string to escape
+
+    Returns:
+    --------
+    str
+        The escaped string wrapped in single quotes, with internal single quotes escaped.
+        Example: "John's" becomes "'John\\'s'"
+    """
     return "'" + strtext.replace("'","\\'") + "'"
+
+def f_string(value):
+    if value is None:
+        return ""
+    return str(value)
+
+def f_fieldstringtoarray(strfields):
+    if strfields is None:
+        return []
+    strfields = str(strfields).strip()
+    if strfields == "":
+        return []
+    if "," in strfields:
+        parts = strfields.split(",")
+    else:
+        parts = strfields.split("|")
+    return [p.strip() for p in parts if p.strip() != ""]
+
+def f_descfromcode(strtable, strfieldcode, strfielddesc, intcode, strwhere="", strassoctable=""):
+    strresult = ""
+    if (
+        strtable
+        and strfieldcode
+        and strfielddesc
+        and intcode is not None
+        and str(intcode) != ""
+    ):
+        arrfields = f_fieldstringtoarray(strfielddesc)
+        strsql = "SELECT *"
+        strsql += f" FROM {strtable}"
+        if strassoctable != "":
+            strsql += f", {strassoctable}"
+        strsql += " WHERE "
+        if strassoctable != "":
+            strsql += f"{strtable}.{strfieldcode}"
+        else:
+            strsql += f"{strfieldcode}"
+        strsql += " = %s"
+        if strwhere != "":
+            strsql += f" AND {strwhere}"
+
+        connectioncp = f_getconnection()
+        cursor2 = connectioncp.cursor()
+        cursor2.execute(strsql, (intcode,))
+        rstemp = cursor2.fetchone()
+        if rstemp and arrfields:
+            strtemp = ""
+            for field in arrfields:
+                if field in rstemp:
+                    strtemp += f_string(rstemp[field]) + " "
+            strresult = strtemp.strip()
+    return strresult
+
+def f_fieldfromquery(strsql, strfield="", params=None, execute=True):
+    if not strsql:
+        return None
+    if not execute:
+        return None
+
+    connectioncp = f_getconnection()
+    cursor2 = connectioncp.cursor()
+    if params is None:
+        cursor2.execute(strsql)
+    else:
+        cursor2.execute(strsql, params)
+    rstemp = cursor2.fetchone()
+    if not rstemp:
+        return None
+
+    if strfield == "":
+        for _, value in rstemp.items():
+            return f_string(value)
+        return ""
+
+    return f_string(rstemp.get(strfield))
+
+def f_fieldsfromquery(strsql, strvars, strfields, params=None, execute=True, target_dict=None):
+    if not strsql or not strvars or not strfields:
+        return {}
+    if not execute:
+        return {}
+
+    connectioncp = f_getconnection()
+    cursor2 = connectioncp.cursor()
+    if params is None:
+        cursor2.execute(strsql)
+    else:
+        cursor2.execute(strsql, params)
+    rstemp = cursor2.fetchone()
+    if not rstemp:
+        return {}
+
+    arrvars = [v.strip() for v in str(strvars).split("|")]
+    arrfields = f_fieldstringtoarray(strfields)
+
+    result = {}
+    for var_name, field_name in zip(arrvars, arrfields):
+        if var_name and field_name:
+            value = f_string(rstemp.get(field_name))
+            result[var_name] = value
+
+    if target_dict is None:
+        target_dict = globals()
+    if target_dict is not None:
+        for k, v in result.items():
+            target_dict[k] = v
+
+    return result
 

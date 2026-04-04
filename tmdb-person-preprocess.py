@@ -530,14 +530,12 @@ def batch_update_data_country_of_birth(connection, df, batch_size=1000):
 
 strdattoday = datetime.now(cp.paris_tz).strftime("%Y-%m-%d")
 
-# Connect to the database
-#connection = pymysql.connect(host=cp.strdbhost, user=cp.strdbuser, password=cp.strdbpassword, database=cp.strdbname, cursorclass=pymysql.cursors.DictCursor)
-
 try:
-    with cp.connectioncp:
-        with cp.connectioncp.cursor() as cursor:
-            cursor2 = cp.connectioncp.cursor()
-            cursor3 = cp.connectioncp.cursor()
+    conn = cp.f_getconnection()
+    with conn:
+        with conn.cursor() as cursor:
+            cursor2 = conn.cursor()
+            cursor3 = conn.cursor()
             start_time = time.time()
             strnow = datetime.now(cp.paris_tz).strftime("%Y-%m-%d %H:%M:%S")
             cp.f_setservervariable("strtmdbpersonpreprocessstartdatetime",strnow,"Date and time of the last start of the TMDb database preprocess",0)
@@ -549,7 +547,7 @@ try:
             strtotalruntimedesc = "Total runtime of the TMDb person preprocess"
             strtotalruntimeprevious = cp.f_getservervariable("strtmdbpersonpreprocesstotalruntime",0)
             cp.f_setservervariable("strtmdbpersonpreprocesstotalruntimeprevious",strtotalruntimeprevious,strtotalruntimedesc + " (previous execution)",0)
-            strtotalruntime = ""
+            strtotalruntime = "RUNNING"
             cp.f_setservervariable("strtmdbpersonpreprocesstotalruntime",strtotalruntime,strtotalruntimedesc,0)
             
             arrprocessscope = {1: 'COUNTRY_OF_BIRTH', 2: 'ALSO_KNOWN_AS'}
@@ -766,4 +764,6 @@ ORDER BY ID_PERSON ASC
     print("Process completed")
 except pymysql.MySQLError as e:
     print(f"❌ MySQL Error: {e}")
-    cp.connectioncp.rollback()
+    conn = getattr(cp, "connectioncp", None)
+    if conn is not None and getattr(conn, "open", False):
+        conn.rollback()
