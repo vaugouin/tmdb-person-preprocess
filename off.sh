@@ -1,2 +1,2 @@
-mv tmdb-person-preprocess.sh tmdb-person-preprocess-old.sh
+mv tmdb-person-preprocess.sh tmdb-person-preprocess-off.sh
 

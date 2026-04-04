@@ -2,6 +2,7 @@ from typing import List
 
 
 def _contains_any_in_ranges(s: str, ranges: List[range]) -> bool:
+    """Return whether any character in ``s`` falls inside the provided Unicode ranges."""
     for ch in s:
         cp_ = ord(ch)
         for r in ranges:
@@ -11,6 +12,7 @@ def _contains_any_in_ranges(s: str, ranges: List[range]) -> bool:
 
 
 def guess_language_family(person_name: str) -> str:
+    """Guess a broad script or language family from the Unicode characters in a name."""
     if not person_name:
         return ""
 
