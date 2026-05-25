@@ -1,0 +1,45 @@
+# Secrets — never bake into the image.
+# At runtime, secrets are injected via `docker run --env-file ...`
+# (see README.md and tmdb-person-preprocess.sh).
+.env
+.env.*
+!.env.example
+
+# VCS
+.git
+.gitignore
+
+# Python bytecode / caches
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Virtual environments
+.venv
+venv
+env
+
+# Editor / OS noise
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Local agent / tooling state
+.claude
+
+# Container helper scripts (not needed inside the image)
+on.sh
+off.sh
+tmdb-person-preprocess.sh
+
+# Docs and license — keep image lean
+doc
+README.md
+AGENTS.md
+CLAUDE.md
+LICENSE

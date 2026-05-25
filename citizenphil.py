@@ -5,6 +5,7 @@
 import pymysql.cursors
 #import re
 from datetime import datetime
+import time
 import pytz
 import os
 from pathlib import Path
@@ -34,6 +35,28 @@ strlanguage = "en"
 connectioncp = None
 
 paris_tz = pytz.timezone(os.environ.get("USER_TIMEZONE", "Europe/Paris"))
+
+def f_ismysqllocktimeout(err):
+    errcode = None
+    if hasattr(err, "args") and len(err.args) > 0:
+        errcode = err.args[0]
+    return errcode == 1205
+
+def f_handlemysqlerror(err, context="", rollback=True):
+    connectioncp = globals().get("connectioncp")
+    if rollback and connectioncp is not None and getattr(connectioncp, "open", False):
+        try:
+            connectioncp.rollback()
+        except Exception:
+            pass
+    if f_ismysqllocktimeout(err):
+        if context:
+            print(f"⚠️ MySQL lock wait timeout skipped in {context}: {err}")
+        else:
+            print(f"⚠️ MySQL lock wait timeout skipped: {err}")
+        return True
+    print(f"❌ MySQL Error: {err}")
+    return False
 
 def f_getconnection():
     """
@@ -100,75 +123,56 @@ def f_sqlupdatearray(strsqltablename, arrpersoncouples, strsqlupdatecondition, i
     global paris_tz
     
     connectioncp = f_getconnection()
-    cursor2 = connectioncp.cursor()
-    if intaddstdfields == 1:
-        if "TIM_UPDATED" not in arrpersoncouples:
-            arrpersoncouples["TIM_UPDATED"] = datetime.now(paris_tz).strftime("%Y-%m-%d %H:%M:%S")
-    strsqlexists = f"SELECT * FROM {strsqltablename} WHERE {strsqlupdatecondition}"
-    # print(strsqlexists)
-    cursor2.execute(strsqlexists)
-    lngrowcount = cursor2.rowcount
-    if lngrowcount == 0:
-        # Record does not exist
-        if intaddstdfields == 1:
-            if "DELETED" not in arrpersoncouples:
-                arrpersoncouples["DELETED"] = 0
-            if "DAT_CREAT" not in arrpersoncouples:
-                arrpersoncouples["DAT_CREAT"] = datetime.now(paris_tz).strftime("%Y-%m-%d")
-            if "ID_CREATOR" not in arrpersoncouples:
-                arrpersoncouples["ID_CREATOR"] = lnguseridsession
-            if "ID_OWNER" not in arrpersoncouples:
-                arrpersoncouples["ID_OWNER"] = lnguseridsession
-            if "ID_USER_UPDATED" not in arrpersoncouples:
-                arrpersoncouples["ID_USER_UPDATED"] = lnguseridsession
-        
-        # print(arrpersoncouples)
-        # ("INSERT INTO")
-        strsqlinsertcolumns = ', '.join(arrpersoncouples.keys())
-        strsqlinsertplaceholders = ', '.join(['%s'] * len(arrpersoncouples))
-        strsqlinsert = f"INSERT INTO {strsqltablename} ({strsqlinsertcolumns}) VALUES ({strsqlinsertplaceholders})"
-        # print(strsqlinsert)
-        cursor2.execute(strsqlinsert, list(arrpersoncouples.values()))
-        lngnewid = cursor2.lastrowid
-        connectioncp.commit()
-        return lngnewid
-    else:
-        # Record already exist
-        # print(arrpersoncouples)
-        # generate key/pair array
-        arrvalues = []
-        for key,value in arrpersoncouples.items():
-            # print(f"{key} = {value}")
-            if isinstance(value, bool):
-                arrvalues.append(f"{key} = {1 if value else 0}")
-            elif isinstance(value, int): # Handle Integers
-                arrvalues.append("{key} = {value}".format(key=key, value=value))
-            elif isinstance(value, float): # Handle floats
-                arrvalues.append("{key} = {value}".format(key=key, value=value))
-            elif value is None: # Handle NULL
-                arrvalues.append("{key} = NULL".format(key=key))
-            else: # Default Handler
-                # Fixing the value when it contains a \' element (espaped as \\\')
-                value=value.replace("\\\'", "'")
-                # Fixing the value when it contains a \" element (espaped as \\\")
-                value=value.replace('\\\"', '"')
-                # value=value.replace("\\'", "'")
-                value=value.replace("'", "\\'")
-                arrvalues.append("{key} = '{value}'".format(key=key, value=value))
-        # generate string from key/pair array
-        strsqlupdatesetclause = ", ".join(arrvalues)
-        # Define the condition for the update
-        # strsqlupdatecondition = f"{strsqlkeyfield} = {strsqlkeyvalue}"
-        # format SQL string
-        strsqlupdate = f"UPDATE {strsqltablename} SET {strsqlupdatesetclause} WHERE {strsqlupdatecondition};"
-        # print(strsqlupdate)
+    intattemptsremaining = 3
+    while intattemptsremaining > 0:
+        cursor2 = connectioncp.cursor()
         try:
-            cursor2.execute(strsqlupdate)
-            # print("UPDATE")
+            if intaddstdfields == 1:
+                if "TIM_UPDATED" not in arrpersoncouples:
+                    arrpersoncouples["TIM_UPDATED"] = datetime.now(paris_tz).strftime("%Y-%m-%d %H:%M:%S")
+            strsqlexists = f"SELECT * FROM {strsqltablename} WHERE {strsqlupdatecondition}"
+            cursor2.execute(strsqlexists)
+            lngrowcount = cursor2.rowcount
+            if lngrowcount == 0:
+                if intaddstdfields == 1:
+                    if "DELETED" not in arrpersoncouples:
+                        arrpersoncouples["DELETED"] = 0
+                    if "DAT_CREAT" not in arrpersoncouples:
+                        arrpersoncouples["DAT_CREAT"] = datetime.now(paris_tz).strftime("%Y-%m-%d")
+                    if "ID_CREATOR" not in arrpersoncouples:
+                        arrpersoncouples["ID_CREATOR"] = lnguseridsession
+                    if "ID_OWNER" not in arrpersoncouples:
+                        arrpersoncouples["ID_OWNER"] = lnguseridsession
+                    if "ID_USER_UPDATED" not in arrpersoncouples:
+                        arrpersoncouples["ID_USER_UPDATED"] = lnguseridsession
+                strsqlinsertcolumns = ', '.join(arrpersoncouples.keys())
+                strsqlinsertplaceholders = ', '.join(['%s'] * len(arrpersoncouples))
+                strsqlinsert = f"INSERT INTO {strsqltablename} ({strsqlinsertcolumns}) VALUES ({strsqlinsertplaceholders})"
+                cursor2.execute(strsqlinsert, list(arrpersoncouples.values()))
+                lngnewid = cursor2.lastrowid
+                connectioncp.commit()
+                return lngnewid
+            arrsetclauses = []
+            arrupdatevalues = []
+            for key, value in arrpersoncouples.items():
+                arrsetclauses.append(f"{key} = %s")
+                if isinstance(value, bool):
+                    arrupdatevalues.append(1 if value else 0)
+                else:
+                    arrupdatevalues.append(value)
+            strsqlupdatesetclause = ", ".join(arrsetclauses)
+            strsqlupdate = f"UPDATE {strsqltablename} SET {strsqlupdatesetclause} WHERE {strsqlupdatecondition};"
+            cursor2.execute(strsqlupdate, arrupdatevalues)
             connectioncp.commit()
+            return None
         except pymysql.MySQLError as e:
-            print(f"❌ MySQL Error: {e}")
-            connectioncp.rollback()
+            intattemptsremaining -= 1
+            if f_ismysqllocktimeout(e) and intattemptsremaining > 0:
+                f_handlemysqlerror(e, f"f_sqlupdatearray({strsqltablename})")
+                time.sleep(1)
+                continue
+            f_handlemysqlerror(e, f"f_sqlupdatearray({strsqltablename})")
+            return None
 
 # Server variables functions
 
