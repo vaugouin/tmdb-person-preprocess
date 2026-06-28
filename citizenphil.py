@@ -1,3 +1,54 @@
+"""
+citizenphil -- shared MariaDB/MySQL access layer (PyMySQL).
+
+This module is **copied verbatim into ~20 sibling repositories** (imdb-crawler,
+tmdb-crawler, wikidata-crawler, movieparadise, ...). Any change here must stay
+**backward compatible**: never alter the signature or behavior of an existing
+function -- only add new ones. A regression here is a regression in every repo.
+
+Core invariants
+---------------
+1. ONE shared connection. ``f_getconnection`` returns a single module-level
+   PyMySQL connection (``connectioncp``). PyMySQL connections are **NOT
+   thread-safe**: every DB call must run on the **same thread**. Code may
+   parallelize network/parse work, but all DB writes stay on one thread.
+2. MANY cursors, one session. Opening several cursors on that one connection is
+   supported and relied upon (e.g. movieparadise; the wikipedia crawler's
+   DELETE-after-write). Because the cursors share one session, a row written
+   through one cursor is visible to another cursor **as soon as the statement is
+   executed** -- this is read-your-writes, and several repos depend on it.
+3. Visibility depends on WHEN the write reaches the DB:
+   - ``f_sqlupdatearray``  -> commits per row        -> immediately visible.
+   - ``f_sqlbulkupsert``   -> one statement per chunk -> visible only after the
+     call returns. Do NOT use it for rows another cursor must read mid-batch.
+
+Which function for which use case
+---------------------------------
+| Use case                                             | Function            | Visibility          |
+|------------------------------------------------------|---------------------|---------------------|
+| Single row that must be readable right away by       | f_sqlupdatearray    | Immediate (per-row  |
+|   another cursor, or re-SELECTed later in the run    |                     | commit)             |
+| Many rows, same table, NOT re-read within the call   | f_sqlbulkupsert     | Deferred until the  |
+|   (bulk derived data: sections, images, ...)         |                     | call returns        |
+| Resume checkpoints / progress counters               | f_setservervariable | Immediate; NEVER    |
+|                                                      |                     | batch               |
+| Read one field / one row                             | f_fieldfromquery /  | --                  |
+|                                                      | f_descfromcode      |                     |
+| Lazy connection handle                               | f_getconnection     | --                  |
+
+Do NOT use f_sqlbulkupsert when:
+  * a row is re-SELECTed (by any cursor) before the call returns,
+  * you need the generated AUTO_INCREMENT id of an inserted row,
+  * the rows are a crash-recovery checkpoint that must be durable in order.
+
+f_sqlbulkupsert and unique keys
+-------------------------------
+f_sqlbulkupsert emits ``INSERT ... ON DUPLICATE KEY UPDATE``. The UPDATE branch
+only fires when the target table has a UNIQUE/PRIMARY key on the conflict
+columns. On a table WITHOUT such a key it degrades to a plain multi-row INSERT
+(every row is inserted) -- correct only when the caller has already removed the
+rows being replaced (the delete-then-bulk-insert / replace-set pattern).
+"""
 #from urllib.parse import quote
 #import time
 #import requests
@@ -84,6 +135,7 @@ def f_getconnection():
             password=strdbpassword,
             database=strdbname,
             cursorclass=pymysql.cursors.DictCursor,
+            local_infile=True,
         )
     return connectioncp
 
@@ -174,6 +226,129 @@ def f_sqlupdatearray(strsqltablename, arrpersoncouples, strsqlupdatecondition, i
             f_handlemysqlerror(e, f"f_sqlupdatearray({strsqltablename})")
             return None
 
+def f_sqlbulkupsert(strsqltablename, arrrows, arrkeycolumns, intaddstdfields=1, intchunksize=500):
+    """
+    Insert many rows in a single statement (bulk upsert).
+
+    Collapses N per-row SELECT+INSERT/UPDATE round-trips (see ``f_sqlupdatearray``)
+    into one multi-row ``INSERT ... ON DUPLICATE KEY UPDATE`` per chunk. Intended
+    for high-volume derived rows that are NOT re-read inside the same call.
+
+    Parameters
+    ----------
+    strsqltablename : str
+        Target table.
+    arrrows : list[dict]
+        One dict per row (column name -> value). Rows may carry different keys;
+        the ordered union of all keys is used and any missing value is sent as
+        NULL so every row in a chunk shares one column list.
+    arrkeycolumns : list[str]
+        Columns that form the logical/unique key. They are written on INSERT but
+        excluded from the ON DUPLICATE KEY UPDATE clause (a row never overwrites
+        its own key). If the table has a matching UNIQUE/PRIMARY key the call is a
+        true upsert; otherwise it is a plain multi-row INSERT -- correct only when
+        the caller has already deleted the rows being replaced (see module docs).
+    intaddstdfields : int
+        1 -> add standard fields. Creation fields (DELETED, DAT_CREAT, ID_CREATOR,
+        ID_OWNER, ID_USER_UPDATED) are written on INSERT only and preserved on
+        update; TIM_UPDATED is always (re)written. 0 -> add nothing.
+    intchunksize : int
+        Maximum rows per INSERT statement (guards max_allowed_packet). Default 500.
+
+    Returns
+    -------
+    int
+        Number of input rows processed (0 for an empty list).
+
+    Notes
+    -----
+    Same single-connection rules as the rest of the module. Rows become visible
+    to other cursors only AFTER this call returns -- never use it for resume
+    checkpoints, lastrowid needs, or read-your-writes inside the batch.
+    """
+    global paris_tz
+
+    if not arrrows:
+        return 0
+
+    arrkeycolumns = list(arrkeycolumns or [])
+    insertonlystd = {"DELETED", "DAT_CREAT", "ID_CREATOR", "ID_OWNER", "ID_USER_UPDATED"}
+
+    # Normalize rows (add standard fields) and build the ordered column union.
+    strnow = datetime.now(paris_tz).strftime("%Y-%m-%d %H:%M:%S")
+    strtoday = datetime.now(paris_tz).strftime("%Y-%m-%d")
+    arrnormalized = []
+    arrcolumns = []
+    setcolumns = set()
+    for row in arrrows:
+        rowcopy = dict(row)
+        if intaddstdfields == 1:
+            rowcopy.setdefault("TIM_UPDATED", strnow)
+            rowcopy.setdefault("DELETED", 0)
+            rowcopy.setdefault("DAT_CREAT", strtoday)
+            rowcopy.setdefault("ID_CREATOR", lnguseridsession)
+            rowcopy.setdefault("ID_OWNER", lnguseridsession)
+            rowcopy.setdefault("ID_USER_UPDATED", lnguseridsession)
+        for col in rowcopy.keys():
+            if col not in setcolumns:
+                setcolumns.add(col)
+                arrcolumns.append(col)
+        arrnormalized.append(rowcopy)
+
+    # On duplicate, refresh the data columns + TIM_UPDATED, but never the key
+    # columns or the insert-only creation metadata (mirrors f_sqlupdatearray).
+    arrupdatecolumns = [
+        col for col in arrcolumns
+        if col not in arrkeycolumns and col not in insertonlystd
+    ]
+
+    strcolumnlist = ", ".join(arrcolumns)
+    strrowplaceholder = "(" + ", ".join(["%s"] * len(arrcolumns)) + ")"
+    if arrupdatecolumns:
+        strupdateclause = " ON DUPLICATE KEY UPDATE " + ", ".join(
+            f"{col} = VALUES({col})" for col in arrupdatecolumns
+        )
+    else:
+        strupdateclause = ""
+
+    def _rowvalues(rowcopy):
+        values = []
+        for col in arrcolumns:
+            value = rowcopy.get(col)
+            if isinstance(value, bool):
+                values.append(1 if value else 0)
+            else:
+                values.append(value)
+        return values
+
+    connectioncp = f_getconnection()
+    lngtotal = 0
+    for lngstart in range(0, len(arrnormalized), intchunksize):
+        arrchunk = arrnormalized[lngstart:lngstart + intchunksize]
+        strvalues = ", ".join([strrowplaceholder] * len(arrchunk))
+        strsql = f"INSERT INTO {strsqltablename} ({strcolumnlist}) VALUES {strvalues}{strupdateclause}"
+        arrparams = []
+        for rowcopy in arrchunk:
+            arrparams.extend(_rowvalues(rowcopy))
+
+        intattemptsremaining = 3
+        while intattemptsremaining > 0:
+            cursor2 = connectioncp.cursor()
+            try:
+                cursor2.execute(strsql, arrparams)
+                connectioncp.commit()
+                lngtotal += len(arrchunk)
+                break
+            except pymysql.MySQLError as e:
+                intattemptsremaining -= 1
+                if f_ismysqllocktimeout(e) and intattemptsremaining > 0:
+                    f_handlemysqlerror(e, f"f_sqlbulkupsert({strsqltablename})")
+                    time.sleep(1)
+                    continue
+                f_handlemysqlerror(e, f"f_sqlbulkupsert({strsqltablename})")
+                break
+    return lngtotal
+
 # Server variables functions
 
 def f_getservervariable(strvarname,lnglang=0):
@@ -229,7 +404,13 @@ def f_setservervariable(strvarname,strvarvalue,strvardesc="",lnglang=0):
     None
     """
     global strsqlns
-    
+
+    # VAR_VALUE is varchar(255); guard every write so an over-long value
+    # (e.g. a long SQL query persisted for monitoring) can never trigger
+    # MySQL error 1406 "Data too long for column 'VAR_VALUE'".
+    if isinstance(strvarvalue, str) and len(strvarvalue) > 255:
+        strvarvalue = strvarvalue[:252] + "..."
+
     arrcouples = {}
     arrcouples["VAR_NAME"] = strvarname
     arrcouples["VAR_VALUE"] = strvarvalue
