@@ -13,6 +13,24 @@ Deeper specs live in their own files:
 
 ---
 
+## Related repositories (project ecosystem)
+
+`tmdb-person-preprocess` is one stage of **Agent BBB**, a multi-repository movie/TV database system owned by GitHub user `vaugouin`. All sibling repos live under `%USERPROFILE%/Code/<repo>` and at `github.com/vaugouin/<repo>`; they are interdependent stages of one pipeline that converges on a shared MySQL/MariaDB database (`T_WC_*` tables) and a ChromaDB vector store. The canonical roster of sibling repositories is kept in `doc/related-repositories/related-repositories.txt` in the `tmdb-front` repo.
+
+Pipeline stages:
+- **Infrastructure** — `python` (shared crawler base image), `chromadb` (vector service), `reverseproxy` (NGINX TLS ingress), `chromadb-security-test` (firewall validation).
+- **Acquisition** — `tmdb-crawler`, `imdb-crawler`, `sparql-crawler`, `sparql-movies-persons`, `wikidata-crawler`, `wikipedia-crawler`, `selenium-tmdb`, `download-images`, `sqlite-plex-to-tmdb`, `movieparadise`.
+- **Preprocessing → `T_WC_T2S_*`** — `tmdb-movie-preprocess`, `tmdb-person-preprocess`, `keywords-processing`.
+- **Semantic index & name resolution** — `embedding-update`, `embedding-query`, `rapidfuzz_query`.
+- **Serving** — `fastapi-text2sql` (NL→SQL API + MCP server), `voice-agent`, `tmdb-front` (PHP web front-end).
+- **Evaluation** — `eval-text2sql`, `extract-movie-questions`.
+- **Maintenance & tooling** — `plex-duplicates`, `subtitle-translate`, `powershell`, `playwright-test`.
+- **Monitoring & observability** — `data-monitoring`.
+
+**This repository's role:** Preprocessing stage. Enriches person records — country-of-birth parsing and alias normalization — writing back to the `T_WC_TMDB_PERSON*` tables. Runs alongside `tmdb-movie-preprocess` and `keywords-processing` to prepare the `T_WC_T2S_*` read-model consumed by `fastapi-text2sql`.
+
+---
+
 ## Where things live (file → role)
 
 Edit at the right layer; the architecture is intentionally split.
@@ -68,5 +86,23 @@ Keep Markdown, prompt files, JSON config, and logs UTF-8. These files contain no
 
 ---
 
-**Last Updated**: 2026-05-18
+## Build & deployment (Docker)
+
+This preprocessor is built and run as a Docker container via the repo's root `Dockerfile`. The image is based on `python:3.10.5-slim-buster`, installs `requirements.txt`, copies the repo into `/app`, and runs `python ./tmdb-person-preprocess.py` as its `CMD`. Pass database credentials at runtime (e.g. `docker run --env-file ...`); do not bake secrets into the image.
+
+---
+
+**Last Updated**: 2026-06-03
 **Current Version**: 1.0.0 
+
+## Backlog (Nestor second-brain)
+
+The prioritized, agent-ready implementation backlog for this repo lives in the **Nestor**
+knowledge repo (a separate repo, not cloned alongside this one):
+
+- This repo: `C:\Users\vaugo\Nestor\projets\t2s-backlog\repos\tmdb-person-preprocess.md`
+- Cross-repo dashboard: `C:\Users\vaugo\Nestor\projets\t2s-backlog\index.md`
+
+Consult it before implementing: tasks are `TMDB-PERSON-PREPROCESS-NNN` with status (done / in-progress /
+todo), priority, and quick-wins. NOTE: these are local paths on Philippe's PC and do not
+resolve on the VPS or on cloud agents (claude.ai/code).

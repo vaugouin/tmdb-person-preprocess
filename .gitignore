@@ -2,3 +2,7 @@ citizenphilsecrets.py
 .env
 country_lookup.py
 extract-country-of-birth.py
+
+# Claude Code / agent local tooling
+.claude/
+.agents/
