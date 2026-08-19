@@ -124,11 +124,17 @@ def f_getconnection():
     - Reuses the module-level `connectioncp` if it already exists and is open.
     - Opens a new connection only when no connection exists or the current one
       is closed.
+    - Pings a reused connection before handing it back. A pooled connection can
+      sit idle for many hours (a Wikidata ETL pass streams the full dump for a
+      day or more between two server-variable writes); the server drops it on
+      `wait_timeout` while pymysql still reports `open == True`, so the next
+      query fails with 2013 "Lost connection to MySQL server during query".
+      The ping reconnects transparently instead.
     """
     global connectioncp
-    
-    if connectioncp is None or not getattr(connectioncp, "open", False):
-        connectioncp = pymysql.connect(
+
+    def f_openconnection():
+        return pymysql.connect(
             host=strdbhost,
             port=lngdbport,
             user=strdbuser,
@@ -137,6 +143,18 @@ def f_getconnection():
             cursorclass=pymysql.cursors.DictCursor,
             local_infile=True,
         )
+
+    if connectioncp is None or not getattr(connectioncp, "open", False):
+        connectioncp = f_openconnection()
+    else:
+        try:
+            connectioncp.ping(reconnect=True)
+        except Exception:
+            try:
+                connectioncp.close()
+            except Exception:
+                pass
+            connectioncp = f_openconnection()
     return connectioncp
 
 def f_sqlupdatearray(strsqltablename, arrpersoncouples, strsqlupdatecondition, intaddstdfields):

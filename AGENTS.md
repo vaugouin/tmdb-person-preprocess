@@ -106,3 +106,16 @@ knowledge repo (a separate repo, not cloned alongside this one):
 Consult it before implementing: tasks are `TMDB-PERSON-PREPROCESS-NNN` with status (done / in-progress /
 todo), priority, and quick-wins. NOTE: these are local paths on Philippe's PC and do not
 resolve on the VPS or on cloud agents (claude.ai/code).
+
+## SQL files live in `doc/sql/`
+
+Stack-wide convention, set 2026-08-20. Every **read-only** `.sql` of this repo, audit
+queries, monitoring queries, exports, reference DDL dumps, lives in `doc/sql/`, never
+at the root and never in a `doc/queries/` of its own.
+
+Two deliberate exceptions, and they are the reason the rule is worded around reading
+rather than around file type. A `.sql` **executed by code** stays where the code expects
+it, because moving it breaks a run silently. And a `.sql` that **writes** (migration,
+seed, `DELETE` cleanup) stays put too: it belongs to a procedure, not to documentation.
+When in doubt, ask whether running the file twice by accident would change the database.
+If yes, it is not a `doc/sql/` file.
