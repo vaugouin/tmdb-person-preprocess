@@ -6,3 +6,7 @@ extract-country-of-birth.py
 # Claude Code / agent local tooling
 .claude/
 .agents/
+
+# Python bytecode (already excluded from the image by .dockerignore)
+__pycache__/
+*.pyc
