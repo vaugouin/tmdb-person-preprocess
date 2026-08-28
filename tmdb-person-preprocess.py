@@ -589,6 +589,14 @@ try:
                         while True:
                             # Keyset pagination on the primary key: bounded memory and no
                             # OFFSET rescan, instead of one fetchall() of the whole table.
+                            # The <> 'None' guard is not paranoia: tmdb-crawler used to
+                            # store str(None), the 4-character text "None", when TMDb
+                            # returned a null place of birth. That is neither NULL nor
+                            # empty, so it slipped through the two filters above and made
+                            # this pass read and parse ~4.5M junk rows out of 5M. The
+                            # crawler now writes NULL and migrations/clear_none_place_of_birth.py
+                            # cleans the backlog; the guard stays as the cheap belt and
+                            # braces against a regression upstream.
                             cursor2.execute(
                                 "SELECT ID_PERSON, PLACE_OF_BIRTH, "
                                 "COUNTRY_OF_BIRTH_LONG AS COUNTRY_OF_BIRTH_LONG_DB, "
@@ -596,6 +604,7 @@ try:
                                 "FROM T_WC_TMDB_PERSON "
                                 "WHERE ID_PERSON > %s "
                                 "AND PLACE_OF_BIRTH IS NOT NULL AND PLACE_OF_BIRTH <> '' "
+                                "AND PLACE_OF_BIRTH <> 'None' "
                                 "ORDER BY ID_PERSON ASC LIMIT %s",
                                 (lnglastid, lngcobreadchunksize)
                             )

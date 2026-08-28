@@ -113,20 +113,50 @@ A healthy steady-state run shows a large *examined* count next to a near-zero
 after run means the diff is not converging: something else is overwriting the same
 columns between runs.
 
-### Pending migration: unique key on the alias table
+### Migrations
 
-`T_WC_TMDB_PERSON_ALSO_KNOWN_AS` has no `UNIQUE` key on `(ID_PERSON, PERSON_NAME)`,
-although that pair is the table's logical key. The alias pass deletes the duplicates
-it meets, but nothing prevents new ones. [`migrations/add_unique_person_alias_key.py`](migrations/add_unique_person_alias_key.py)
-deduplicates and adds the key. It is **not applied automatically**:
+One-shot schema and data repairs live in [`migrations/`](migrations/). None of them is
+ever invoked by the pipeline: they are run by hand, in a low-traffic window, with the
+preprocess stopped (`bash off.sh`, then `bash on.sh` afterwards, see below). All of
+them are **dry run by default** and idempotent, so a second run after success reports
+that there is nothing to do.
+
+Run them from inside the container, overriding the image's default command:
 
 ```bash
-python migrations/add_unique_person_alias_key.py           # dry run, reports only
-python migrations/add_unique_person_alias_key.py --apply   # dedupe, then ALTER
+docker run -it --rm --network="host" \
+  --env-file /home/debian/docker/tmdb-person-preprocess/.env \
+  --name tmdb-person-preprocess-migration \
+  tmdb-person-preprocess-python-app \
+  python ./migrations/<script>.py            # add --apply to write
 ```
 
-The `ALTER` is blocking and the table has millions of rows: run it in a low-traffic
-window, or pass `--skip-alter` and add the index with `pt-online-schema-change`.
+Use a container name distinct from `tmdb-person-preprocess`, and prefer `-d` plus
+`docker logs -f` (without `--rm`) for the long ones, so a dropped SSH session does not
+kill the job halfway.
+
+| Script | What it repairs | Status |
+| --- | --- | --- |
+| [`add_unique_person_alias_key.py`](migrations/add_unique_person_alias_key.py) | Deduplicates `T_WC_TMDB_PERSON_ALSO_KNOWN_AS` on `(ID_PERSON, PERSON_NAME)` and adds the missing `UNIQUE` key, so duplicate aliases cannot come back | Applied 2026-08-28 (729 groups, 737 rows removed) |
+| [`clear_none_place_of_birth.py`](migrations/clear_none_place_of_birth.py) | Turns the literal text `"None"` back into SQL `NULL` in `PLACE_OF_BIRTH` and `COUNTRY_OF_BIRTH_LONG` | Run **after** the `tmdb-crawler` fix is deployed |
+
+#### About the `"None"` cleanup
+
+`tmdb-crawler` used to read the person payload with `str(data['place_of_birth'])`, and
+TMDb sends `"place_of_birth": null` for most persons. `str(None)` is the 4-character
+string `"None"`, which is neither `NULL` nor empty, so it defeated every
+`IS NOT NULL AND <> ''` filter: the country-of-birth pass was reading and parsing about
+4.5M junk rows out of 5M on every run, and storing `COUNTRY_OF_BIRTH_LONG = 'none'`
+derived from them.
+
+The crawler now stores `NULL` (`tmdb_functions.py`, person payload block). Deploy that
+first: running the cleanup while the old crawler is live just lets it write `"None"`
+again on the persons it refreshes. The pass also carries a `PLACE_OF_BIRTH <> 'None'`
+guard, kept as cheap insurance against the same regression upstream.
+
+The cleanup deliberately leaves `COUNTRY_OF_BIRTH` alone. It already holds `''` on those
+rows, which is what the pass stores for any place it cannot resolve; turning only this
+subset into `NULL` would make "unknown country" mean two different things.
 
 ### Tracing
 
