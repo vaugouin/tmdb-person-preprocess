@@ -35,6 +35,31 @@ Pipeline stages:
 
 Edit at the right layer; the architecture is intentionally split.
 
+- `tmdb-person-preprocess.py` : the pipeline itself, one block per process in
+  `arrprocessscope` (1 = COUNTRY_OF_BIRTH, 2 = ALSO_KNOWN_AS).
+- `citizenphil.py` : shared DB layer, also vendored into the sibling repos. A change
+  here is a stack-wide change: `f_sqlupdatearray` costs one `SELECT *` + one UPDATE +
+  one COMMIT per call, `f_sqlbulkupsert` collapses N rows into one statement. Prefer
+  the latter in any loop over more than a few hundred rows.
+- `migrations/*.py` : one-shot schema/data repairs, dry run by default, `--apply` to
+  act. Never invoked by the pipeline; run by hand, in a low-traffic window.
+
+## Do not write TIM_UPDATED on T_WC_TMDB_PERSON
+
+`tmdb-crawler` fills its person refresh queue with
+`WHERE T_WC_TMDB_PERSON.TIM_UPDATED < <J-30>`. This preprocess derives
+`COUNTRY_OF_BIRTH*` from data it did not author, so stamping `TIM_UPDATED` on the
+rows it touches marks the whole table as freshly crawled and starves that queue.
+
+Concretely: the country-of-birth write goes through `f_sqlbulkupsert(...,
+intaddstdfields=0)`. Do not "fix" that 0 into a 1, and do not route the write back
+through `f_sqlupdatearray(..., 1)`.
+
+The same reasoning is why both processes are differential: they compare against the
+stored value and send only real changes. Reintroducing an unconditional rewrite turns
+a few-minute run back into a multi-hour one and, through `TIM_UPDATED`, breaks the
+crawler downstream.
+
 ## Code conventions
 
 - **Hungarian notation** for variables (legacy style):
@@ -92,7 +117,7 @@ This preprocessor is built and run as a Docker container via the repo's root `Do
 
 ---
 
-**Last Updated**: 2026-06-03
+**Last Updated**: 2026-08-28
 **Current Version**: 1.0.0 
 
 ## Backlog (Nestor second-brain)

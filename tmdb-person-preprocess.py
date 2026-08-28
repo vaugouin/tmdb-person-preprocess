@@ -30,6 +30,15 @@ country_lookup_dict: Dict[str, str] = {}
 is_initialized: bool = False
 #intaskllm: bool = True
 intaskllm: bool = False
+# Per-row tracing. Left off in production: the loops below run over millions of
+# persons and, under Docker's json-file log driver, one print per row is a
+# blocking write that dominates the runtime and fills the disk with logs.
+intverbose: bool = False
+
+# Read page sizes. Both loops paginate on the primary key (keyset pagination)
+# instead of buffering the whole table client-side.
+lngcobreadchunksize: int = 200000   # COUNTRY_OF_BIRTH: 4 narrow columns per row
+lngakapersonchunksize: int = 1000   # ALSO_KNOWN_AS: ALSO_KNOWN_AS is a mediumtext
 
 def normalize_string(s: str) -> str:
     """
@@ -62,7 +71,6 @@ def initialize_country_lookup():
             ORDER BY COUNTRY_CODE ASC
         """
         cursor2 = cp.connectioncp.cursor()
-        print(query)
         cursor2.execute(query)
         results2 = cursor2.fetchall()
         for row2 in results2:
@@ -77,7 +85,8 @@ def initialize_country_lookup():
                     normalized_fr = normalize_string(name_fr)
                     if normalized_fr not in country_lookup_dict:
                         country_lookup_dict[normalized_fr] = country_code
-                        print(normalized_fr,'->',country_code)
+                        if intverbose:
+                            print(normalized_fr,'->',country_code)
             
             # Add the English name
             if name_en:
@@ -85,7 +94,8 @@ def initialize_country_lookup():
                     normalized_en = normalize_string(name_en)
                     if normalized_en not in country_lookup_dict:
                         country_lookup_dict[normalized_en] = country_code
-                        print(normalized_en,'->',country_code)
+                        if intverbose:
+                            print(normalized_en,'->',country_code)
             
             # Process aliases if they exist
             if aliases and len(aliases) > 1:  # Check if it's not empty or just a single pipe
@@ -95,9 +105,11 @@ def initialize_country_lookup():
                         normalized_alias = normalize_string(alias)
                         if normalized_alias not in country_lookup_dict:
                             country_lookup_dict[normalized_alias] = country_code
-                            print(normalized_alias,'->',country_code)
+                            if intverbose:
+                                print(normalized_alias,'->',country_code)
         
         cursor2.close()
+        print(f"Country lookup initialized with {len(country_lookup_dict)} entries")
         is_initialized = True
         
     except Exception as e:
@@ -195,7 +207,8 @@ def f_countrylookup(input_str: str) -> str:
         if strcountrycode:
             add_country_alias(strcountrycode, input_str)
     
-    print(input_str,'->',strcountrycode)
+    if intverbose:
+        print(input_str,'->',strcountrycode)
     return strcountrycode
 
 
@@ -463,70 +476,64 @@ def build_person_names(name: Optional[str], also_known_as: Optional[str]) -> Lis
             out.append(person_name)
     return out
 
-def batch_update_data_country_of_birth(connection, df, batch_size=1000):
-    """Update data in batches to improve performance"""
-    try:
-        cursor = connection.cursor()
-        
-        # Create a copy of the dataframe to avoid modifying the original
-        processed_df = df.copy()
-        
-        print("\nSample of processed data:")
-        print(processed_df.head())
-        
-        # Total number of rows
-        total_rows = len(processed_df)
-        print("\nTotal number of rows to update: ",total_rows)
-        rows_updated = 0
-        rows_failed = 0
-        
-        # Process in batches
-        for i in range(0, total_rows, batch_size):
-            batch_df = processed_df.iloc[i:i+batch_size]
-            
-            # Process each row in the batch
-            for _, row in batch_df.iterrows():
-                # Prepare data for update, ensuring all values are properly processed
-                update_data = (
-                    #process_value(row['PLACE_OF_BIRTH']),
-                    #process_value(row['PLACE_OF_BIRTH_ORIGINAL']),
-                    process_value(row['COUNTRY_OF_BIRTH_LONG']),
-                    process_value(row['COUNTRY_OF_BIRTH']),
-                    row['ID_PERSON']  # WHERE clause
-                )
-                
-                # Display the produced UPDATE SQL query with parameter values
-                #print("\nExecuting SQL query with parameters:")
-                print(update_data)
-                arrpersoncouples = {}
-                #arrpersoncouples["PLACE_OF_BIRTH"] = row['PLACE_OF_BIRTH']
-                #arrpersoncouples["PLACE_OF_BIRTH_ORIGINAL"] = row['PLACE_OF_BIRTH_ORIGINAL']
-                arrpersoncouples["COUNTRY_OF_BIRTH_LONG"] = row['COUNTRY_OF_BIRTH_LONG']
-                arrpersoncouples["COUNTRY_OF_BIRTH"] = row['COUNTRY_OF_BIRTH']
-                strsqltablename = "T_WC_TMDB_PERSON"
-                strsqlupdatecondition = f"ID_PERSON = {row['ID_PERSON']}"
-                cp.f_sqlupdatearray(strsqltablename,arrpersoncouples,strsqlupdatecondition,1)
-                rows_updated += 1
-                
-            cp.f_setservervariable("strtmdbpersonpreprocesscountryofbirthparsedcount",str(rows_updated),"Count of PLACE_OF_BIRTH row parsed",0)
-            cp.f_setservervariable("strtmdbpersonpreprocesscountryofbirthfailedcount",str(rows_failed),"Count of PLACE_OF_BIRTH row failed",0)
-            # Commit batch
-            connection.commit()
-            
-            # Update progress
-            progress = ((i + len(batch_df)) / total_rows) * 100
-            print(f"Progress: {progress:.2f}% - Updated {rows_updated} rows, Failed {rows_failed}", end='\r')
-        
-        print(f"\nData update completed: {rows_updated} rows updated successfully, {rows_failed} rows failed")
-        
-    except Error as e:
-        print(f"\nError updating data: {e}")
-        print("\nTerminating script due to SQL error.")
-        sys.exit(1)
-    except Exception as e:
-        print(f"\nUnexpected error: {e}")
-        print("\nTerminating script due to unexpected error.")
-        sys.exit(1)
+def f_samestoredvalue(dbvalue, newvalue):
+    """Tell whether a stored column already holds the freshly computed value.
+
+    The column is NULL for a person never processed and '' for one processed to an
+    empty result; both mean "nothing stored", so neither must be reported as a
+    change or the loop would rewrite the whole table on every run.
+    """
+    if dbvalue is None or (isinstance(dbvalue, float) and pd.isna(dbvalue)):
+        dbvalue = ""
+    return str(dbvalue) == str(newvalue)
+
+def batch_update_data_country_of_birth(connection, df, batch_size=500):
+    """Write back only the persons whose derived country of birth actually changed.
+
+    The previous version sent, per person, a `SELECT *` (biography mediumtext
+    included) plus an UPDATE plus a COMMIT through f_sqlupdatearray, and because it
+    was called with batch_size=1 it also upserted two server variables per row:
+    roughly thirteen round-trips and four commits for each of the 4.3M rows, whether
+    or not the value had moved. PLACE_OF_BIRTH is near-immutable, so the computed
+    values are compared against what the table already holds and only the
+    differences are shipped, in multi-row statements.
+
+    TIM_UPDATED is deliberately NOT touched (intaddstdfields=0). COUNTRY_OF_BIRTH is
+    derived, not source data, and tmdb-crawler fills its person refresh queue from
+    `WHERE T_WC_TMDB_PERSON.TIM_UPDATED < <J-30>`; stamping the column here marks
+    every person as freshly crawled and starves that queue.
+
+    Args:
+        connection: open MariaDB connection (kept for signature compatibility).
+        df: DataFrame carrying ID_PERSON, the computed COUNTRY_OF_BIRTH /
+            COUNTRY_OF_BIRTH_LONG, and their stored counterparts suffixed _DB.
+        batch_size: rows per INSERT ... ON DUPLICATE KEY UPDATE statement.
+
+    Returns:
+        A (rows_examined, rows_updated) tuple.
+    """
+    arrchanged = []
+    for row in df.itertuples(index=False):
+        strlong = process_value(row.COUNTRY_OF_BIRTH_LONG)[:200]
+        strcode = process_value(row.COUNTRY_OF_BIRTH)[:10]
+        if (f_samestoredvalue(row.COUNTRY_OF_BIRTH_LONG_DB, strlong)
+                and f_samestoredvalue(row.COUNTRY_OF_BIRTH_DB, strcode)):
+            continue
+        arrchanged.append({
+            "ID_PERSON": int(row.ID_PERSON),
+            "COUNTRY_OF_BIRTH_LONG": strlong,
+            "COUNTRY_OF_BIRTH": strcode,
+        })
+
+    if not arrchanged:
+        return len(df), 0
+
+    # ID_PERSON is the primary key, so ON DUPLICATE KEY UPDATE is a true in-place
+    # update; the INSERT branch is never taken for persons read from this table.
+    lngupdated = cp.f_sqlbulkupsert(
+        "T_WC_TMDB_PERSON", arrchanged, ["ID_PERSON"], 0, batch_size
+    )
+    return len(df), lngupdated
 
 strdattoday = datetime.now(cp.paris_tz).strftime("%Y-%m-%d")
 
@@ -568,59 +575,62 @@ try:
                     initialize_country_lookup()
 
                     try:
-                        # Read data from database using fetchall()
-                        query = """
-SELECT ID_PERSON, PLACE_OF_BIRTH 
-FROM T_WC_TMDB_PERSON 
-WHERE PLACE_OF_BIRTH IS NOT NULL 
-AND PLACE_OF_BIRTH <> '' 
-ORDER BY ID_PERSON ASC 
-                        """
-                        print(query)
-                        cursor2.execute(query)
-                        result = cursor2.fetchall()
-                        # Convert the result to a pandas DataFrame
-                        data = pd.DataFrame(result)
-                        print(f"Loaded {len(data)} rows of data")
-                        print(data.head(20))
-                        #time.sleep(5)
+                        # clean_place_of_birth() and f_countrylookup() are pure functions
+                        # of PLACE_OF_BIRTH, and millions of persons share a few tens of
+                        # thousands of distinct birthplaces. Memoizing across pages turns
+                        # 4.3M parses + lookups into one per distinct value per run.
+                        arrcleancache = {}
+                        arrcountrycache = {}
 
-                        # Create backup of original data
-                        data['PLACE_OF_BIRTH'] = data['PLACE_OF_BIRTH'].astype(str)
-                        data['PLACE_OF_BIRTH_ORIGINAL'] = data['PLACE_OF_BIRTH']
-                        
-                        # Convert to lowercase and apply cleaning
-                        data['PLACE_OF_BIRTH'] = data['PLACE_OF_BIRTH'].str.lower()
-                        data['PLACE_OF_BIRTH'] = data['PLACE_OF_BIRTH'].apply(clean_place_of_birth)
-                        data['COUNTRY_OF_BIRTH_LONG'] = data['PLACE_OF_BIRTH']
+                        lnglastid = 0
+                        lngexamined = 0
+                        lngupdated = 0
+                        lngfailed = 0
+                        while True:
+                            # Keyset pagination on the primary key: bounded memory and no
+                            # OFFSET rescan, instead of one fetchall() of the whole table.
+                            cursor2.execute(
+                                "SELECT ID_PERSON, PLACE_OF_BIRTH, "
+                                "COUNTRY_OF_BIRTH_LONG AS COUNTRY_OF_BIRTH_LONG_DB, "
+                                "COUNTRY_OF_BIRTH AS COUNTRY_OF_BIRTH_DB "
+                                "FROM T_WC_TMDB_PERSON "
+                                "WHERE ID_PERSON > %s "
+                                "AND PLACE_OF_BIRTH IS NOT NULL AND PLACE_OF_BIRTH <> '' "
+                                "ORDER BY ID_PERSON ASC LIMIT %s",
+                                (lnglastid, lngcobreadchunksize)
+                            )
+                            result = cursor2.fetchall()
+                            if not result:
+                                break
+                            lnglastid = result[-1]['ID_PERSON']
 
-                        print("\nAfter clean_place_of_birth()")
-                        print(data['PLACE_OF_BIRTH'].head(20))
-                        time.sleep(5)
-                        #sys.exit(1)
-                        
-                        #  Apply transformations and extract components
-                        country_of_birth = data['PLACE_OF_BIRTH'].apply(extract_country_of_birth)
+                            data = pd.DataFrame(result)
+                            data['PLACE_OF_BIRTH'] = data['PLACE_OF_BIRTH'].astype(str).str.lower()
 
-                        print("\nAfter extract_country_of_birth()")
-                        print(country_of_birth.head(20))
-                        time.sleep(5)
+                            for strplace in data['PLACE_OF_BIRTH'].unique():
+                                if strplace in arrcleancache:
+                                    continue
+                                strclean = clean_place_of_birth(strplace)
+                                arrcleancache[strplace] = strclean
+                                if strclean not in arrcountrycache:
+                                    arrcountrycache[strclean] = f_countrylookup(strclean)
 
-                        # Convert the list of dictionaries to a DataFrame
-                        format_df = pd.DataFrame(country_of_birth.tolist())
-                        
-                        # Add the extracted components to the main DataFrame
-                        data['COUNTRY_OF_BIRTH'] = format_df['COUNTRY_OF_BIRTH']
-                        
-                        # Display sample of processed data
-                        print("\nSample of processed data:")
-                        print(data.head(20))
-                        #time.sleep(5)
-                        
-                        # Update data in batches
-                        print("Updating data in MariaDB...")
-                        batch_update_data_country_of_birth(cp.connectioncp, data, 1)
-                        
+                            data['PLACE_OF_BIRTH'] = data['PLACE_OF_BIRTH'].map(arrcleancache)
+                            data['COUNTRY_OF_BIRTH_LONG'] = data['PLACE_OF_BIRTH']
+                            data['COUNTRY_OF_BIRTH'] = data['PLACE_OF_BIRTH'].map(arrcountrycache)
+
+                            lngpageexamined, lngpageupdated = batch_update_data_country_of_birth(cp.connectioncp, data)
+                            lngexamined += lngpageexamined
+                            lngupdated += lngpageupdated
+
+                            cp.f_setservervariable("strtmdbpersonpreprocesscountryofbirthparsedcount",str(lngexamined),"Count of PLACE_OF_BIRTH row parsed",0)
+                            cp.f_setservervariable("strtmdbpersonpreprocesscountryofbirthupdatedcount",str(lngupdated),"Count of PLACE_OF_BIRTH row actually updated",0)
+                            print(f"COUNTRY_OF_BIRTH: {lngexamined} examined, {lngupdated} updated, {len(arrcleancache)} distinct places (up to ID_PERSON {lnglastid})", flush=True)
+
+                        cp.f_setservervariable("strtmdbpersonpreprocesscountryofbirthfailedcount",str(lngfailed),"Count of PLACE_OF_BIRTH row failed",0)
+                        print("")
+                        print("COUNTRY_OF_BIRTH done: " + str(lngexamined) + " rows examined, " + str(lngupdated) + " rows updated, " + str(lngfailed) + " failed")
+
                         # Calculate and display execution time
                         end_time = time.time()
                         execution_time = end_time - start_time
@@ -635,93 +645,133 @@ ORDER BY ID_PERSON ASC
                     #----------------------------------------------------
                     print("ALSO_KNOWN_AS processing")
                     try:
-                        cursor2.execute("SELECT ID_PERSON, NAME, ALSO_KNOWN_AS FROM T_WC_TMDB_PERSON ORDER BY ID_PERSON ASC ")
-
                         lng_persons_processed = 0
                         lng_aliases_upserted = 0
                         lng_aliases_deleted = 0
+                        lng_duplicates_removed = 0
+                        lng_pages = 0
 
+                        lnglastid = 0
                         while True:
-                            rows = cursor2.fetchmany(1000)
+                            # Keyset pagination on the primary key. The previous version ran
+                            # one unbounded SELECT and walked it with fetchmany(), so pymysql
+                            # buffered 5M rows (ALSO_KNOWN_AS is a mediumtext) client-side
+                            # before the first person was processed.
+                            cursor2.execute(
+                                "SELECT ID_PERSON, NAME, ALSO_KNOWN_AS FROM T_WC_TMDB_PERSON "
+                                "WHERE ID_PERSON > %s ORDER BY ID_PERSON ASC LIMIT %s",
+                                (lnglastid, lngakapersonchunksize)
+                            )
+                            rows = cursor2.fetchall()
                             if not rows:
                                 break
+                            lnglastid = rows[-1]['ID_PERSON']
+                            lng_pages += 1
 
+                            arrdesired = {}
                             for row in rows:
-                                lng_persons_processed += 1
-                                id_person = row['ID_PERSON']
-                                aliases = build_person_names(row.get('NAME'), row.get('ALSO_KNOWN_AS'))
+                                arrdesired[row['ID_PERSON']] = build_person_names(row.get('NAME'), row.get('ALSO_KNOWN_AS'))
+                            lng_persons_processed += len(rows)
 
-                                cursor_existing = cp.connectioncp.cursor()
-                                cursor_existing.execute(
-                                    "SELECT ID_ROW, PERSON_NAME FROM T_WC_TMDB_PERSON_ALSO_KNOWN_AS WHERE ID_PERSON = %s ORDER BY ID_ROW ASC",
-                                    (id_person,)
-                                )
-                                existing_rows = cursor_existing.fetchall()
-                                cursor_existing.close()
-
-                                existing_by_name = {}
-                                for r in existing_rows:
-                                    if not r.get('PERSON_NAME'):
-                                        continue
-                                    name = r['PERSON_NAME']
-                                    if name not in existing_by_name:
-                                        existing_by_name[name] = r['ID_ROW']
-
-                                if not aliases:
-                                    cursor_delete = cp.connectioncp.cursor()
-                                    cursor_delete.execute(
-                                        "DELETE FROM T_WC_TMDB_PERSON_ALSO_KNOWN_AS WHERE ID_PERSON = %s",
-                                        (id_person,)
-                                    )
-                                    lng_aliases_deleted += cursor_delete.rowcount
-                                    cursor_delete.close()
+                            # One round-trip for the whole page, instead of one SELECT per
+                            # person as before.
+                            arrids = list(arrdesired.keys())
+                            strplaceholders = ", ".join(["%s"] * len(arrids))
+                            cursor3.execute(
+                                "SELECT ID_ROW, ID_PERSON, PERSON_NAME, LANGUAGE_FAMILY, DISPLAY_ORDER "
+                                "FROM T_WC_TMDB_PERSON_ALSO_KNOWN_AS "
+                                "WHERE ID_PERSON IN (" + strplaceholders + ") ORDER BY ID_ROW ASC",
+                                arrids
+                            )
+                            arrexisting = {}   # ID_PERSON -> {PERSON_NAME: row}
+                            arrallrows = {}    # ID_PERSON -> [ID_ROW, ...], nameless rows included
+                            arrdelete = []
+                            for rowexisting in cursor3.fetchall():
+                                arrallrows.setdefault(rowexisting['ID_PERSON'], []).append(rowexisting['ID_ROW'])
+                                if not rowexisting.get('PERSON_NAME'):
                                     continue
+                                arrbyname = arrexisting.setdefault(rowexisting['ID_PERSON'], {})
+                                if rowexisting['PERSON_NAME'] in arrbyname:
+                                    # Duplicate (ID_PERSON, PERSON_NAME). The previous code kept
+                                    # the lowest ID_ROW and never looked at the copies again, so
+                                    # they accumulated forever; drop them here.
+                                    arrdelete.append(rowexisting['ID_ROW'])
+                                    lng_duplicates_removed += 1
+                                    continue
+                                arrbyname[rowexisting['PERSON_NAME']] = rowexisting
 
-                                # Upsert current aliases
-                                for idx, alias in enumerate(aliases, start=1):
-                                    alias_db = alias[:200]
-                                    language_family = guess_language_family(alias_db)
+                            arrinsert = []
+                            arrupdate = []
+                            for lngidperson, arraliases in arrdesired.items():
+                                arrbyname = arrexisting.get(lngidperson, {})
+                                if not arraliases:
+                                    arrdelete.extend(arrallrows.get(lngidperson, []))
+                                    continue
+                                setcurrent = set()
+                                for lngdisplayorder, stralias in enumerate(arraliases, start=1):
+                                    stralias = stralias[:200]
+                                    if stralias in setcurrent:
+                                        # Two aliases collapsing onto the same 200 chars.
+                                        continue
+                                    setcurrent.add(stralias)
+                                    strlanguagefamily = guess_language_family(stralias)
+                                    rowexisting = arrbyname.get(stralias)
+                                    if rowexisting is None:
+                                        arrinsert.append({
+                                            "ID_PERSON": lngidperson,
+                                            "PERSON_NAME": stralias,
+                                            "LANGUAGE_FAMILY": strlanguagefamily,
+                                            "DISPLAY_ORDER": lngdisplayorder,
+                                        })
+                                    elif (rowexisting.get('LANGUAGE_FAMILY') != strlanguagefamily
+                                            or rowexisting.get('DISPLAY_ORDER') != lngdisplayorder):
+                                        # The row is there and already correct in the vast
+                                        # majority of cases: only real drift is written.
+                                        arrupdate.append({
+                                            "ID_ROW": rowexisting['ID_ROW'],
+                                            "ID_PERSON": lngidperson,
+                                            "PERSON_NAME": stralias,
+                                            "LANGUAGE_FAMILY": strlanguagefamily,
+                                            "DISPLAY_ORDER": lngdisplayorder,
+                                        })
+                                for strname, rowexisting in arrbyname.items():
+                                    if strname not in setcurrent:
+                                        arrdelete.append(rowexisting['ID_ROW'])
 
-                                    if alias_db in existing_by_name:
-                                        id_row = existing_by_name[alias_db]
-                                        cp.f_sqlupdatearray(
-                                            "T_WC_TMDB_PERSON_ALSO_KNOWN_AS",
-                                            {
-                                                "ID_PERSON": id_person,
-                                                "PERSON_NAME": alias_db,
-                                                "LANGUAGE_FAMILY": language_family,
-                                                "DISPLAY_ORDER": idx,
-                                            },
-                                            f"ID_ROW = {id_row}",
-                                            1
-                                        )
-                                    else:
-                                        cp.f_sqlupdatearray(
-                                            "T_WC_TMDB_PERSON_ALSO_KNOWN_AS",
-                                            {
-                                                "ID_PERSON": id_person,
-                                                "PERSON_NAME": alias_db,
-                                                "LANGUAGE_FAMILY": language_family,
-                                                "DISPLAY_ORDER": idx,
-                                            },
-                                            f"ID_PERSON = {id_person} AND PERSON_NAME = {cp.f_stringtosql(alias_db)}",
-                                            1
-                                        )
-                                    lng_aliases_upserted += 1
+                            if arrdelete:
+                                arrdelete = sorted(set(arrdelete))
+                                for lngstart in range(0, len(arrdelete), 1000):
+                                    arrchunk = arrdelete[lngstart:lngstart + 1000]
+                                    strplaceholders = ", ".join(["%s"] * len(arrchunk))
+                                    cursor3.execute(
+                                        "DELETE FROM T_WC_TMDB_PERSON_ALSO_KNOWN_AS WHERE ID_ROW IN (" + strplaceholders + ")",
+                                        arrchunk
+                                    )
+                                    lng_aliases_deleted += cursor3.rowcount
+                                cp.connectioncp.commit()
 
-                                # Mark stale aliases deleted
-                                current_set = set(a[:200] for a in aliases)
-                                for existing_name, id_row in existing_by_name.items():
-                                    if existing_name not in current_set:
-                                        cursor_delete = cp.connectioncp.cursor()
-                                        cursor_delete.execute(
-                                            "DELETE FROM T_WC_TMDB_PERSON_ALSO_KNOWN_AS WHERE ID_ROW = %s",
-                                            (id_row,)
-                                        )
-                                        lng_aliases_deleted += cursor_delete.rowcount
-                                        cursor_delete.close()
+                            if arrinsert:
+                                # There is no UNIQUE key on (ID_PERSON, PERSON_NAME) yet, so
+                                # this degrades to a plain multi-row INSERT. That is correct
+                                # here because the diff above already established the rows do
+                                # not exist. See migrations/add_unique_person_alias_key.py.
+                                lng_aliases_upserted += cp.f_sqlbulkupsert(
+                                    "T_WC_TMDB_PERSON_ALSO_KNOWN_AS", arrinsert,
+                                    ["ID_PERSON", "PERSON_NAME"], 1, 500
+                                )
+                            if arrupdate:
+                                # Keyed on ID_ROW (the primary key), so this is a true in-place
+                                # update and DAT_CREAT / ID_CREATOR are preserved.
+                                lng_aliases_upserted += cp.f_sqlbulkupsert(
+                                    "T_WC_TMDB_PERSON_ALSO_KNOWN_AS", arrupdate,
+                                    ["ID_ROW"], 1, 500
+                                )
 
-                            cp.connectioncp.commit()
+                            if lng_pages % 10 == 0:
+                                cp.f_setservervariable("strtmdbpersonpreprocessalsoknownaspersons",str(lng_persons_processed),"Count of persons processed for ALSO_KNOWN_AS",0)
+                                cp.f_setservervariable("strtmdbpersonpreprocessalsoknownasupserted",str(lng_aliases_upserted),"Count of ALSO_KNOWN_AS aliases written (inserted or corrected)",0)
+                                cp.f_setservervariable("strtmdbpersonpreprocessalsoknownasdeleted",str(lng_aliases_deleted),"Count of ALSO_KNOWN_AS aliases deleted",0)
+                                print("ALSO_KNOWN_AS: " + str(lng_persons_processed) + " persons, " + str(lng_aliases_upserted) + " written, " + str(lng_aliases_deleted) + " deleted (up to ID_PERSON " + str(lnglastid) + ")", flush=True)
 
                         cp.f_setservervariable(
                             "strtmdbpersonpreprocessalsoknownaspersons",
@@ -732,7 +782,7 @@ ORDER BY ID_PERSON ASC
                         cp.f_setservervariable(
                             "strtmdbpersonpreprocessalsoknownasupserted",
                             str(lng_aliases_upserted),
-                            "Count of ALSO_KNOWN_AS aliases upserted",
+                            "Count of ALSO_KNOWN_AS aliases written (inserted or corrected)",
                             0
                         )
                         cp.f_setservervariable(
@@ -741,6 +791,13 @@ ORDER BY ID_PERSON ASC
                             "Count of ALSO_KNOWN_AS aliases deleted",
                             0
                         )
+                        cp.f_setservervariable(
+                            "strtmdbpersonpreprocessalsoknownasduplicates",
+                            str(lng_duplicates_removed),
+                            "Count of duplicate (ID_PERSON, PERSON_NAME) alias rows removed",
+                            0
+                        )
+                        print("\nALSO_KNOWN_AS done: " + str(lng_persons_processed) + " persons, " + str(lng_aliases_upserted) + " aliases written, " + str(lng_aliases_deleted) + " deleted (" + str(lng_duplicates_removed) + " of them duplicates)")
                     except pymysql.MySQLError as e:
                         print(f"Database error: {e}")
                     except Exception as e:
