@@ -109,15 +109,24 @@ prefix (the front-end lists them by prefix, see `tmdb-front/lib/srvvar.inc.php`)
 | `...alsoknownasupserted` | the sum of the two, kept for continuity |
 | `...alsoknownasdeleted` | alias rows deleted (stale aliases and duplicates) |
 | `...alsoknownasduplicates` | of those, rows that were duplicate `(ID_PERSON, PERSON_NAME)` |
+| `...passmode` | whether this run read every person, or only those updated since the watermark, and why |
+| `...cobwatermark`, `...akawatermark` | per pass: persons with `TIM_UPDATED` below this have been processed |
+| `...lastfullpass` | start of the last full pass that completed |
+| `...derivationversion` | the logic version the stored data was produced with |
 
-### The invariant to watch: two runs in a row
+On an incremental run the *examined* counts are small by design: they report what this run
+looked at, not the size of the table.
 
-A healthy run shows a large *examined* count next to a near-zero *updated* / *inserted*
-count. The real test is stronger, and worth running after any change to either pass:
+### The invariant to watch: two full runs in a row
+
+A healthy run shows a near-zero *updated* / *inserted* count. The real test is stronger,
+and worth running after any change to either pass:
 
 ```bash
-# nothing else touching the database in between
-docker run --rm --network="host" --env-file <envfile>   --name tmdb-person-preprocess-run2 tmdb-person-preprocess-python-app 2>&1 | tail -20
+# Nothing else touching the database in between. PREPROCESS_FULL_PASS matters here:
+# without it the second run reads almost nothing, and proves almost nothing.
+docker run --rm --network="host" --env-file <envfile> -e PREPROCESS_FULL_PASS=1 \
+  --name pp2 tmdb-person-preprocess-python-app 2>&1 | grep -E "done:|Total runtime"
 ```
 
 **The second run must write nothing at all.** A pass that writes on a database it has
@@ -168,6 +177,32 @@ guard, kept as cheap insurance against the same regression upstream.
 The cleanup deliberately leaves `COUNTRY_OF_BIRTH` alone. It already holds `''` on those
 rows, which is what the pass stores for any place it cannot resolve; turning only this
 subset into `NULL` would make "unknown country" mean two different things.
+
+### Incremental reading, and what it cannot see
+
+Both passes only ever write real changes, but reading every person on every run was what
+the runtime was actually made of: 5M rows, the `ALSO_KNOWN_AS` mediumtext included.
+
+Since this preprocess stopped stamping `TIM_UPDATED`, that column is a trustworthy change
+signal, so a run can skip persons whose source data has not moved. The watermark `W` means
+*everything with `TIM_UPDATED` below `W` has been processed*. A run reads the window
+`[W, its own start time)` and, **only if the pass finishes**, moves `W` to that start time.
+A crash or a database error therefore costs a repeat, never a silent hole. Rows updated
+while the run is in flight fall outside the window on purpose; the next run picks them up.
+
+The blind spot is the whole point, so it has to be stated: an incremental run cannot see a
+change that did not move `TIM_UPDATED`. A `T_WC_COUNTRY` row edited by hand, an alias
+changed outside this pipeline, a chunk of writes an error handler swallowed, or a change to
+the derivation logic itself. Three things force a full pass, rather than leaving that to
+somebody remembering:
+
+| Trigger | Mechanism |
+| --- | --- |
+| The derivation logic changed | `lngderivationversion` in `tmdb-person-preprocess.py` no longer matches the stored value. **Bump it** when you touch `clean_place_of_birth`, `f_countrylookup`, `guess_language_family`, `f_aliaskey` or `build_person_names` |
+| Time | The last completed full pass is older than `lngfullpassmaxagedays` (7 days). This is the net for everything the other two miss, including forgetting to bump the version |
+| By hand | `-e PREPROCESS_FULL_PASS=1` on the `docker run` |
+
+The run prints which mode it chose and why, and publishes it as `...passmode`.
 
 ### Alias matching happens under the server's collation
 

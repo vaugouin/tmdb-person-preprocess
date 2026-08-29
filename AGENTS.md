@@ -100,6 +100,23 @@ the write that starts the flip-flop is not.
 
 ---
 
+## The passes read incrementally: bump lngderivationversion when logic changes
+
+Each pass keeps a watermark (`...cobwatermark`, `...akawatermark`): persons whose
+`TIM_UPDATED` is below it have been processed. A run reads `[watermark, run start)` and
+moves the watermark only once the pass has finished, so a crash costs a repeat rather
+than a silent hole.
+
+That makes an incremental run blind to any change that did not move `TIM_UPDATED`,
+**including your own change to the derivation logic**. If you touch
+`clean_place_of_birth`, `f_countrylookup`, `guess_language_family`, `f_aliaskey` or
+`build_person_names`, bump `lngderivationversion`: the mismatch forces one full pass so
+the new logic reaches rows the watermark would otherwise skip forever. Forgetting is
+caught by the periodic full pass (`lngfullpassmaxagedays`, 7 days), just a week later.
+
+Consequence for the two-runs check above: pass `-e PREPROCESS_FULL_PASS=1`. Without it
+the second run reads almost nothing and proves almost nothing.
+
 ## Database Schema Sources
 
 Full DDL lives under [doc/sql/](doc/sql/); do not duplicate table definitions here. Treat these files as reference-only unless the user explicitly asks for schema-doc edits.

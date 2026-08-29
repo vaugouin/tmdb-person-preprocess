@@ -12,6 +12,7 @@ import pandas as pd
 import psutil
 import re
 import sys
+import os
 from typing import Dict, Optional, List, Set
 from language_family import guess_language_family
 from person_names import build_person_names, split_also_known_as, f_aliaskey
@@ -40,6 +41,90 @@ intverbose: bool = False
 # instead of buffering the whole table client-side.
 lngcobreadchunksize: int = 200000   # COUNTRY_OF_BIRTH: 4 narrow columns per row
 lngakapersonchunksize: int = 1000   # ALSO_KNOWN_AS: ALSO_KNOWN_AS is a mediumtext
+
+# --- Incremental reading ----------------------------------------------------
+#
+# Both passes only ever WRITE real changes, but until now they still READ every
+# person on every run: 5M rows, the ALSO_KNOWN_AS mediumtext included. That read was
+# essentially the whole runtime.
+#
+# T_WC_TMDB_PERSON.TIM_UPDATED became a trustworthy change signal the day this
+# preprocess stopped stamping it, so a run can now skip persons whose source data has
+# not moved. The watermark W means "everything with TIM_UPDATED < W has been
+# processed". A run reads the window [W, its own start time) and, only if it finishes,
+# sets W to that start time. Rows updated while the run is in flight sit outside the
+# window on purpose and are picked up by the next one.
+#
+# The watermark is stored per pass, and written only after that pass completes, so a
+# crash or a database error costs a repeat rather than a silent hole.
+
+# Bump this whenever the derivation logic changes: clean_place_of_birth,
+# f_countrylookup, guess_language_family, f_aliaskey, build_person_names. A mismatch
+# with the stored value forces one full pass, so new logic reaches the rows a watermark
+# would otherwise skip forever. Forgetting to bump it is caught by the periodic full
+# pass below, just later.
+lngderivationversion: int = 1
+
+# A full pass is forced when the last one is this old. It is the safety net for
+# everything TIM_UPDATED cannot see: a T_WC_COUNTRY row edited by hand, an alias
+# changed outside this pipeline, a chunk of writes an error handler swallowed. Set it
+# to 0 to make every run a full pass.
+lngfullpassmaxagedays: int = 7
+
+# What a watermark reads as when nothing has been stored yet.
+STRWATERMARKFLOOR: str = "1970-01-01 00:00:00"
+
+
+def f_readwatermark(strvarname, intfullpass):
+    """Return the watermark a pass should start from.
+
+    A full pass ignores whatever is stored and starts from the floor.
+    """
+    if intfullpass:
+        return STRWATERMARKFLOOR
+    strvalue = cp.f_getservervariable(strvarname, 0)
+    return strvalue if strvalue else STRWATERMARKFLOOR
+
+
+def f_decidefullpass():
+    """Say whether this run must read every person instead of following the watermarks.
+
+    Returns:
+        (intfullpass, strreason) with strreason worth printing either way.
+    """
+    if os.environ.get("PREPROCESS_FULL_PASS", "0") == "1":
+        return 1, "PREPROCESS_FULL_PASS is set in the environment"
+
+    strstoredversion = cp.f_getservervariable("strtmdbpersonpreprocessderivationversion", 0)
+    if strstoredversion != str(lngderivationversion):
+        return 1, "derivation version " + (strstoredversion or "unset") + " -> " + str(lngderivationversion)
+
+    strlastfull = cp.f_getservervariable("strtmdbpersonpreprocesslastfullpass", 0)
+    if not strlastfull:
+        return 1, "no full pass recorded yet"
+    try:
+        datlastfull = datetime.strptime(strlastfull, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return 1, "unreadable last full pass timestamp '" + strlastfull + "'"
+
+    lngdays = (datetime.now(cp.paris_tz).replace(tzinfo=None) - datlastfull).days
+    if lngdays >= lngfullpassmaxagedays:
+        return 1, "last full pass was " + str(lngdays) + " days ago"
+    return 0, "last full pass was " + str(lngdays) + " day(s) ago"
+
+
+def f_advancekeyset(row, intfullpass):
+    """Return the (last TIM_UPDATED, last ID_PERSON) cursor after a page.
+
+    A full pass paginates on the primary key alone and has no timestamp to carry.
+    """
+    if intfullpass:
+        return None, row['ID_PERSON']
+    timupdated = row['TIM_UPDATED']
+    if hasattr(timupdated, "strftime"):
+        timupdated = timupdated.strftime("%Y-%m-%d %H:%M:%S")
+    return str(timupdated), row['ID_PERSON']
+
 
 def normalize_string(s: str) -> str:
     """
@@ -524,10 +609,22 @@ try:
             strtotalruntime = "RUNNING"
             cp.f_setservervariable("strtmdbpersonpreprocesstotalruntime",strtotalruntime,strtotalruntimedesc,0)
             
+            # One decision for the whole run, so the two passes cannot disagree about
+            # which window they are reading, and so a single line in the log explains
+            # why a run read 5M persons or 2000.
+            strrunstart = strnow
+            intfullpass, strfullpassreason = f_decidefullpass()
+            strpassmode = ("full pass (" + strfullpassreason + ")") if intfullpass else ("incremental (" + strfullpassreason + ")")
+            print(strpassmode)
+            cp.f_setservervariable("strtmdbpersonpreprocesspassmode",strpassmode,"Whether this run read every person or only those updated since the watermark",0)
+            setprocessesrun = set()
+            setprocessesok = set()
+
             arrprocessscope = {1: 'COUNTRY_OF_BIRTH', 2: 'ALSO_KNOWN_AS'}
             arrprocessscope = {2: 'ALSO_KNOWN_AS', 1: 'COUNTRY_OF_BIRTH'}
             #arrprocessscope = {2: 'ALSO_KNOWN_AS'}
             for intindex, strdesc in arrprocessscope.items():
+                setprocessesrun.add(intindex)
                 strprocessesexecuted += str(intindex) + ", "
                 cp.f_setservervariable("strtmdbpersonpreprocessprocessesexecuted",strprocessesexecuted,strprocessesexecuteddesc,0)
                 cp.f_setservervariable("strtmdbpersonpreprocesscurrentprocess",strdesc,"Current process in the TMDb database preprocess",0)
@@ -549,36 +646,57 @@ try:
                         arrcleancache = {}
                         arrcountrycache = {}
 
+                        strlasttim = f_readwatermark("strtmdbpersonpreprocesscobwatermark", intfullpass)
                         lnglastid = 0
                         lngexamined = 0
                         lngupdated = 0
                         lngfailed = 0
                         while True:
-                            # Keyset pagination on the primary key: bounded memory and no
-                            # OFFSET rescan, instead of one fetchall() of the whole table.
-                            # The <> 'None' guard is not paranoia: tmdb-crawler used to
-                            # store str(None), the 4-character text "None", when TMDb
-                            # returned a null place of birth. That is neither NULL nor
-                            # empty, so it slipped through the two filters above and made
-                            # this pass read and parse ~4.5M junk rows out of 5M. The
-                            # crawler now writes NULL and migrations/clear_none_place_of_birth.py
-                            # cleans the backlog; the guard stays as the cheap belt and
-                            # braces against a regression upstream.
-                            cursor2.execute(
-                                "SELECT ID_PERSON, PLACE_OF_BIRTH, "
-                                "COUNTRY_OF_BIRTH_LONG AS COUNTRY_OF_BIRTH_LONG_DB, "
-                                "COUNTRY_OF_BIRTH AS COUNTRY_OF_BIRTH_DB "
-                                "FROM T_WC_TMDB_PERSON "
-                                "WHERE ID_PERSON > %s "
-                                "AND PLACE_OF_BIRTH IS NOT NULL AND PLACE_OF_BIRTH <> '' "
-                                "AND PLACE_OF_BIRTH <> 'None' "
-                                "ORDER BY ID_PERSON ASC LIMIT %s",
-                                (lnglastid, lngcobreadchunksize)
-                            )
+                            # Two query shapes, one per mode, so each is index-optimal.
+                            #
+                            # A full pass paginates on the primary key: it visits every
+                            # person, TIM_UPDATED NULL included, which no timestamp window
+                            # would reach. An incremental pass paginates on
+                            # (TIM_UPDATED, ID_PERSON), which the TIM_UPDATED index already
+                            # provides since InnoDB appends the primary key to every
+                            # secondary index.
+                            #
+                            # The <> 'None' guard is not paranoia: tmdb-crawler used to store
+                            # str(None), the 4-character text "None", when TMDb returned a
+                            # null place of birth. That is neither NULL nor empty, so it
+                            # slipped through the two filters above and made this pass read
+                            # and parse ~4.5M junk rows out of 5M. The crawler now writes NULL
+                            # and migrations/clear_none_place_of_birth.py cleaned the backlog;
+                            # the guard stays as cheap insurance against a regression upstream.
+                            if intfullpass:
+                                cursor2.execute(
+                                    "SELECT ID_PERSON, PLACE_OF_BIRTH, "
+                                    "COUNTRY_OF_BIRTH_LONG AS COUNTRY_OF_BIRTH_LONG_DB, "
+                                    "COUNTRY_OF_BIRTH AS COUNTRY_OF_BIRTH_DB "
+                                    "FROM T_WC_TMDB_PERSON "
+                                    "WHERE ID_PERSON > %s "
+                                    "AND PLACE_OF_BIRTH IS NOT NULL AND PLACE_OF_BIRTH <> '' "
+                                    "AND PLACE_OF_BIRTH <> 'None' "
+                                    "ORDER BY ID_PERSON ASC LIMIT %s",
+                                    (lnglastid, lngcobreadchunksize)
+                                )
+                            else:
+                                cursor2.execute(
+                                    "SELECT ID_PERSON, PLACE_OF_BIRTH, TIM_UPDATED, "
+                                    "COUNTRY_OF_BIRTH_LONG AS COUNTRY_OF_BIRTH_LONG_DB, "
+                                    "COUNTRY_OF_BIRTH AS COUNTRY_OF_BIRTH_DB "
+                                    "FROM T_WC_TMDB_PERSON "
+                                    "WHERE (TIM_UPDATED > %s OR (TIM_UPDATED = %s AND ID_PERSON > %s)) "
+                                    "AND TIM_UPDATED < %s "
+                                    "AND PLACE_OF_BIRTH IS NOT NULL AND PLACE_OF_BIRTH <> '' "
+                                    "AND PLACE_OF_BIRTH <> 'None' "
+                                    "ORDER BY TIM_UPDATED ASC, ID_PERSON ASC LIMIT %s",
+                                    (strlasttim, strlasttim, lnglastid, strrunstart, lngcobreadchunksize)
+                                )
                             result = cursor2.fetchall()
                             if not result:
                                 break
-                            lnglastid = result[-1]['ID_PERSON']
+                            strlasttim, lnglastid = f_advancekeyset(result[-1], intfullpass)
 
                             data = pd.DataFrame(result)
                             data['PLACE_OF_BIRTH'] = data['PLACE_OF_BIRTH'].astype(str).str.lower()
@@ -603,7 +721,17 @@ try:
                             cp.f_setservervariable("strtmdbpersonpreprocesscountryofbirthupdatedcount",str(lngupdated),"Count of PLACE_OF_BIRTH row actually updated",0)
                             print(f"COUNTRY_OF_BIRTH: {lngexamined} examined, {lngupdated} updated, {len(arrcleancache)} distinct places (up to ID_PERSON {lnglastid})", flush=True)
 
+                        # Republished outside the page loop, not only inside it. An
+                        # incremental run with nothing to read never enters that loop, and
+                        # the counters would otherwise still show the previous run's totals.
+                        cp.f_setservervariable("strtmdbpersonpreprocesscountryofbirthparsedcount",str(lngexamined),"Count of PLACE_OF_BIRTH row parsed",0)
+                        cp.f_setservervariable("strtmdbpersonpreprocesscountryofbirthupdatedcount",str(lngupdated),"Count of PLACE_OF_BIRTH row actually updated",0)
                         cp.f_setservervariable("strtmdbpersonpreprocesscountryofbirthfailedcount",str(lngfailed),"Count of PLACE_OF_BIRTH row failed",0)
+                        # Written here and nowhere else: reaching this line means the whole
+                        # window was read. An exception below leaves the watermark where it
+                        # was, so the next run repeats the work instead of stepping over it.
+                        cp.f_setservervariable("strtmdbpersonpreprocesscobwatermark",strrunstart,"Persons with TIM_UPDATED below this have been parsed for COUNTRY_OF_BIRTH",0)
+                        setprocessesok.add(1)
                         print("")
                         print("COUNTRY_OF_BIRTH done: " + str(lngexamined) + " rows examined, " + str(lngupdated) + " rows updated, " + str(lngfailed) + " failed")
 
@@ -629,21 +757,38 @@ try:
                         lng_duplicates_removed = 0
                         lng_pages = 0
 
+                        strlasttim = f_readwatermark("strtmdbpersonpreprocessakawatermark", intfullpass)
                         lnglastid = 0
                         while True:
-                            # Keyset pagination on the primary key. The previous version ran
-                            # one unbounded SELECT and walked it with fetchmany(), so pymysql
-                            # buffered 5M rows (ALSO_KNOWN_AS is a mediumtext) client-side
-                            # before the first person was processed.
-                            cursor2.execute(
-                                "SELECT ID_PERSON, NAME, ALSO_KNOWN_AS FROM T_WC_TMDB_PERSON "
-                                "WHERE ID_PERSON > %s ORDER BY ID_PERSON ASC LIMIT %s",
-                                (lnglastid, lngakapersonchunksize)
-                            )
+                            # Two query shapes, one per mode. A full pass paginates on the
+                            # primary key and so visits every person, TIM_UPDATED NULL
+                            # included; an incremental pass paginates on
+                            # (TIM_UPDATED, ID_PERSON), which the TIM_UPDATED index already
+                            # provides since InnoDB appends the primary key to it.
+                            #
+                            # Either way the read is paginated. An earlier version ran one
+                            # unbounded SELECT and walked it with fetchmany(), so pymysql
+                            # buffered 5M rows, the ALSO_KNOWN_AS mediumtext included, before
+                            # the first person was processed.
+                            if intfullpass:
+                                cursor2.execute(
+                                    "SELECT ID_PERSON, NAME, ALSO_KNOWN_AS FROM T_WC_TMDB_PERSON "
+                                    "WHERE ID_PERSON > %s ORDER BY ID_PERSON ASC LIMIT %s",
+                                    (lnglastid, lngakapersonchunksize)
+                                )
+                            else:
+                                cursor2.execute(
+                                    "SELECT ID_PERSON, NAME, ALSO_KNOWN_AS, TIM_UPDATED "
+                                    "FROM T_WC_TMDB_PERSON "
+                                    "WHERE (TIM_UPDATED > %s OR (TIM_UPDATED = %s AND ID_PERSON > %s)) "
+                                    "AND TIM_UPDATED < %s "
+                                    "ORDER BY TIM_UPDATED ASC, ID_PERSON ASC LIMIT %s",
+                                    (strlasttim, strlasttim, lnglastid, strrunstart, lngakapersonchunksize)
+                                )
                             rows = cursor2.fetchall()
                             if not rows:
                                 break
-                            lnglastid = rows[-1]['ID_PERSON']
+                            strlasttim, lnglastid = f_advancekeyset(rows[-1], intfullpass)
                             lng_pages += 1
 
                             arrdesired = {}
@@ -824,6 +969,10 @@ try:
                             "Count of duplicate (ID_PERSON, PERSON_NAME) alias rows removed",
                             0
                         )
+                        # Same rule as the other pass: the watermark moves only once the
+                        # window has been read in full.
+                        cp.f_setservervariable("strtmdbpersonpreprocessakawatermark",strrunstart,"Persons with TIM_UPDATED below this have been processed for ALSO_KNOWN_AS",0)
+                        setprocessesok.add(2)
                         print("\nALSO_KNOWN_AS done: " + str(lng_persons_processed) + " persons, " + str(lng_aliases_inserted) + " inserted, " + str(lng_aliases_updated) + " updated, " + str(lng_aliases_deleted) + " deleted (" + str(lng_duplicates_removed) + " of them duplicates)")
                     except pymysql.MySQLError as e:
                         print(f"Database error: {e}")
@@ -831,6 +980,13 @@ try:
                         print(f"Error processing ALSO_KNOWN_AS: {e}")
                     finally:
                         print("ALSO_KNOWN_AS processing done")
+            if intfullpass and setprocessesrun and setprocessesrun == setprocessesok:
+                # Both the clock and the version are stamped here, never earlier: a full
+                # pass that half finished must not stop the next run from redoing it.
+                cp.f_setservervariable("strtmdbpersonpreprocesslastfullpass",strrunstart,"Start of the last full pass that completed",0)
+                cp.f_setservervariable("strtmdbpersonpreprocessderivationversion",str(lngderivationversion),"Derivation logic version the stored data was produced with",0)
+            elif intfullpass:
+                print("Full pass incomplete: not recording it, the next run will start over")
             print("------------------------------------------")
             strcurrentprocess = ""
             cp.f_setservervariable("strtmdbpersonpreprocesscurrentprocess",strcurrentprocess,"Current process in the TMDb database preprocess",0)
