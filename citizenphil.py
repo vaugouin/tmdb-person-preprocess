@@ -30,6 +30,8 @@ Which function for which use case
 |   another cursor, or re-SELECTed later in the run    |                     | commit)             |
 | Many rows, same table, NOT re-read within the call   | f_sqlbulkupsert     | Deferred until the  |
 |   (bulk derived data: sections, images, ...)         |                     | call returns        |
+| Many rows where a conflict means "already owned by   | f_sqlbulkinsert     | Deferred until the  |
+|   someone else", so the stored row must be untouched |   noclobber         | call returns        |
 | Resume checkpoints / progress counters               | f_setservervariable | Immediate; NEVER    |
 |                                                      |                     | batch               |
 | Read one field / one row                             | f_fieldfromquery /  | --                  |
@@ -366,6 +368,118 @@ def f_sqlbulkupsert(strsqltablename, arrrows, arrkeycolumns, intaddstdfields=1, 
                 f_handlemysqlerror(e, f"f_sqlbulkupsert({strsqltablename})")
                 break
     return lngtotal
+
+def f_sqlbulkinsertnoclobber(strsqltablename, arrrows, intaddstdfields=1, intchunksize=500):
+    """Insert many rows in one statement, leaving any row that already exists alone.
+
+    Same shape as ``f_sqlbulkupsert``, opposite behaviour on conflict: where that one
+    refreshes the data columns, this one does nothing at all and keeps the stored row
+    exactly as it is.
+
+    Use it when a conflict means "someone else already owns this row", not "this row is
+    stale". The case it was written for: aliases in T_WC_TMDB_PERSON_ALSO_KNOWN_AS,
+    whose PERSON_NAME is utf8mb4_unicode_ci under a UNIQUE key. That collation folds
+    case, Latin diacritics, hiragana against katakana, full-width against half-width,
+    and more; no Python normalization reproduces it exactly. So a caller cannot always
+    tell in advance that two of the aliases it wants are one row for the server. When it
+    guesses wrong, an upsert makes the second alias overwrite the first one's
+    DISPLAY_ORDER, the next run puts it back, and the pass writes forever without ever
+    converging. Leaving the existing row untouched removes the possibility.
+
+    The no-op is expressed as ``ON DUPLICATE KEY UPDATE <first column> = <first column>``
+    rather than ``INSERT IGNORE``: IGNORE also downgrades genuine errors (truncation,
+    bad values) to warnings, which is exactly what you do not want on a data path.
+
+    Parameters
+    ----------
+    strsqltablename : str
+        Target table.
+    arrrows : list[dict]
+        One dict per row (column name -> value). Rows may carry different keys; the
+        ordered union of all keys is used and any missing value is sent as NULL.
+    intaddstdfields : int
+        1 -> add TIM_UPDATED, DELETED, DAT_CREAT, ID_CREATOR, ID_OWNER, ID_USER_UPDATED
+        to rows that do not carry them. 0 -> add nothing.
+    intchunksize : int
+        Maximum rows per INSERT statement (guards max_allowed_packet). Default 500.
+
+    Returns
+    -------
+    int
+        Number of rows actually inserted, NOT the number of rows submitted. Rows that
+        collided report 0, so the return value is a true "what changed" count and can be
+        published as a convergence signal.
+    """
+    global paris_tz
+
+    if not arrrows:
+        return 0
+
+    strnow = datetime.now(paris_tz).strftime("%Y-%m-%d %H:%M:%S")
+    strtoday = datetime.now(paris_tz).strftime("%Y-%m-%d")
+    arrnormalized = []
+    arrcolumns = []
+    setcolumns = set()
+    for row in arrrows:
+        rowcopy = dict(row)
+        if intaddstdfields == 1:
+            rowcopy.setdefault("TIM_UPDATED", strnow)
+            rowcopy.setdefault("DELETED", 0)
+            rowcopy.setdefault("DAT_CREAT", strtoday)
+            rowcopy.setdefault("ID_CREATOR", lnguseridsession)
+            rowcopy.setdefault("ID_OWNER", lnguseridsession)
+            rowcopy.setdefault("ID_USER_UPDATED", lnguseridsession)
+        for col in rowcopy.keys():
+            if col not in setcolumns:
+                setcolumns.add(col)
+                arrcolumns.append(col)
+        arrnormalized.append(rowcopy)
+
+    strcolumnlist = ", ".join(arrcolumns)
+    strrowplaceholder = "(" + ", ".join(["%s"] * len(arrcolumns)) + ")"
+    # Assigning a column to itself is the standard way to say "on conflict, do nothing"
+    # while still letting real errors surface.
+    strnoclobber = f" ON DUPLICATE KEY UPDATE {arrcolumns[0]} = {arrcolumns[0]}"
+
+    def _rowvalues(rowcopy):
+        values = []
+        for col in arrcolumns:
+            value = rowcopy.get(col)
+            if isinstance(value, bool):
+                values.append(1 if value else 0)
+            else:
+                values.append(value)
+        return values
+
+    connectioncp = f_getconnection()
+    lnginserted = 0
+    for lngstart in range(0, len(arrnormalized), intchunksize):
+        arrchunk = arrnormalized[lngstart:lngstart + intchunksize]
+        strvalues = ", ".join([strrowplaceholder] * len(arrchunk))
+        strsql = f"INSERT INTO {strsqltablename} ({strcolumnlist}) VALUES {strvalues}{strnoclobber}"
+        arrparams = []
+        for rowcopy in arrchunk:
+            arrparams.extend(_rowvalues(rowcopy))
+
+        intattemptsremaining = 3
+        while intattemptsremaining > 0:
+            cursor2 = connectioncp.cursor()
+            try:
+                cursor2.execute(strsql, arrparams)
+                connectioncp.commit()
+                # One per inserted row, zero per row left alone.
+                lnginserted += cursor2.rowcount
+                break
+            except pymysql.MySQLError as e:
+                intattemptsremaining -= 1
+                if f_ismysqllocktimeout(e) and intattemptsremaining > 0:
+                    f_handlemysqlerror(e, f"f_sqlbulkinsertnoclobber({strsqltablename})")
+                    time.sleep(1)
+                    continue
+                f_handlemysqlerror(e, f"f_sqlbulkinsertnoclobber({strsqltablename})")
+                break
+    return lnginserted
+
 
 # Server variables functions
 

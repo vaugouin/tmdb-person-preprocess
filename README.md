@@ -181,14 +181,27 @@ believed missing, the upsert landed on the existing row and imposed its `DISPLAY
 and the next run put the other spelling back. Around 26k writes per run, indefinitely,
 with no deletion to show for it.
 
-`person_names.f_aliaskey` is the fold that keeps Python and the server in agreement, and
-the pass looks an alias up by its **exact** spelling first, by the folded key only as a
-fallback. That order is deliberate: the fold does not claim to reproduce the collation
-exactly, and looking exact-first means a fold that is too aggressive can at worst skip an
-insert. It can never make the pass delete an alias the server was willing to keep.
+Two rules keep the pass convergent, and neither of them requires reproducing the
+collation exactly, which is just as well because no Python normalization does.
 
-If you ever simplify that lookup back to a plain dictionary hit on `PERSON_NAME`, the
-two-runs-in-a-row check above will go red.
+**Look up by the exact spelling first, by the folded key only as a fallback.**
+`person_names.f_aliaskey` folds case and Latin diacritics. That order means a fold which
+is too aggressive can at worst skip an insert; it can never make the pass delete an alias
+the server was willing to keep.
+
+**An insert must never overwrite the row it lands on.** The collation folds more than
+`f_aliaskey` does: hiragana against katakana, full-width against half-width, `Æ` against
+`AE`. Some aliases the pass believes missing are therefore the server's view of a row
+another alias already owns. `citizenphil.f_sqlbulkinsertnoclobber` leaves such a row
+exactly as it is, so the owner keeps its `DISPLAY_ORDER` and there is nothing to put back
+next run. It returns the number of rows **actually** inserted, which is what makes
+`...alsoknownasinserted` a convergence signal rather than a count of attempts.
+
+Chasing the collation was the wrong instinct here: folding case alone took the churn from
+26.5k writes per run down to 6.7k, and it was the no-clobber insert that took it to zero.
+
+If you ever simplify the lookup back to a plain dictionary hit on `PERSON_NAME`, or turn
+that insert back into an upsert, the two-runs-in-a-row check above will go red.
 
 ### Tracing
 

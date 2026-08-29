@@ -759,13 +759,19 @@ try:
                                 cp.connectioncp.commit()
 
                             if arrinsert:
-                                # There is no UNIQUE key on (ID_PERSON, PERSON_NAME) yet, so
-                                # this degrades to a plain multi-row INSERT. That is correct
-                                # here because the diff above already established the rows do
-                                # not exist. See migrations/add_unique_person_alias_key.py.
-                                lng_aliases_inserted += cp.f_sqlbulkupsert(
-                                    "T_WC_TMDB_PERSON_ALSO_KNOWN_AS", arrinsert,
-                                    ["ID_PERSON", "PERSON_NAME"], 1, 500
+                                # No-clobber, and that is the whole point. f_aliaskey folds
+                                # case and Latin diacritics, but the collation also folds
+                                # hiragana against katakana, full-width against half-width,
+                                # and more; no Python normalization reproduces it exactly. So
+                                # some of these "missing" aliases are in fact the server's
+                                # view of a row another alias already owns. An upsert would
+                                # hand them that row's DISPLAY_ORDER, the owner would take it
+                                # back next run, and the pass would write forever. Leaving the
+                                # stored row alone removes the possibility rather than trying
+                                # to predict it. The count returned is rows actually inserted,
+                                # so the server variable stays a true convergence signal.
+                                lng_aliases_inserted += cp.f_sqlbulkinsertnoclobber(
+                                    "T_WC_TMDB_PERSON_ALSO_KNOWN_AS", arrinsert, 1, 500
                                 )
                             if arrupdate:
                                 # Keyed on ID_ROW (the primary key), so this is a true in-place

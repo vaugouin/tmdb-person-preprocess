@@ -73,10 +73,17 @@ pass inserted the spelling it believed missing, the upsert imposed its `DISPLAY_
 on the existing row, and the next run put the other spelling back. Roughly 26k writes
 per run with zero deletions, invisible in any single run's output.
 
-`person_names.f_aliaskey` is the fold that keeps both sides in agreement. Look an alias
-up by its exact spelling first and by the folded key only as a fallback: the fold cannot
-claim to reproduce the collation exactly, and that order means a fold that is too
-aggressive skips an insert rather than deleting a legitimate alias.
+Two rules keep it convergent, neither of which requires reproducing the collation.
+`person_names.f_aliaskey` folds case and Latin diacritics, and an alias is looked up by
+its exact spelling first, by the folded key only as a fallback: a fold that is too
+aggressive then skips an insert rather than deleting a legitimate alias. And an insert
+never overwrites the row it lands on (`citizenphil.f_sqlbulkinsertnoclobber`), because a
+conflict here means the row is already owned by another alias, not that it is stale.
+
+That second rule is what actually closed it. The collation also folds hiragana against
+katakana and full-width against half-width; folding case alone only took the churn from
+26.5k writes per run to 6.7k. Trying to out-guess a collation is a losing game, removing
+the write that starts the flip-flop is not.
 
 ## Code conventions
 
