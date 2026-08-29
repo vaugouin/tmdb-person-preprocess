@@ -104,14 +104,25 @@ prefix (the front-end lists them by prefix, see `tmdb-front/lib/srvvar.inc.php`)
 | `...countryofbirthupdatedcount` | persons whose country of birth actually **changed** |
 | `...countryofbirthfailedcount` | persons the pass could not process |
 | `...alsoknownaspersons` | persons examined by the alias pass |
-| `...alsoknownasupserted` | aliases **written**: inserted, or corrected because the language family or display order had drifted |
+| `...alsoknownasinserted` | aliases the table did not hold yet |
+| `...alsoknownasupdated` | existing aliases corrected in place (language family or display order had drifted) |
+| `...alsoknownasupserted` | the sum of the two, kept for continuity |
 | `...alsoknownasdeleted` | alias rows deleted (stale aliases and duplicates) |
 | `...alsoknownasduplicates` | of those, rows that were duplicate `(ID_PERSON, PERSON_NAME)` |
 
-A healthy steady-state run shows a large *examined* count next to a near-zero
-*updated* / *written* count. A *written* count that stays as high as *examined* run
-after run means the diff is not converging: something else is overwriting the same
-columns between runs.
+### The invariant to watch: two runs in a row
+
+A healthy run shows a large *examined* count next to a near-zero *updated* / *inserted*
+count. The real test is stronger, and worth running after any change to either pass:
+
+```bash
+# nothing else touching the database in between
+docker run --rm --network="host" --env-file <envfile>   --name tmdb-person-preprocess-run2 tmdb-person-preprocess-python-app 2>&1 | tail -20
+```
+
+**The second run must write nothing at all.** A pass that writes on a database it has
+just converged is thrashing: it is not reacting to a change, it is fighting itself. That
+is how the alias collation defect below was found, after it had shipped.
 
 ### Migrations
 
@@ -157,6 +168,27 @@ guard, kept as cheap insurance against the same regression upstream.
 The cleanup deliberately leaves `COUNTRY_OF_BIRTH` alone. It already holds `''` on those
 rows, which is what the pass stores for any place it cannot resolve; turning only this
 subset into `NULL` would make "unknown country" mean two different things.
+
+### Alias matching happens under the server's collation
+
+`T_WC_TMDB_PERSON_ALSO_KNOWN_AS.PERSON_NAME` is `utf8mb4_unicode_ci` and, since the
+unique key was added, `(ID_PERSON, PERSON_NAME)` identifies one row. That collation
+folds case **and** diacritics on Latin letters, so `Jean Reno`, `JEAN RENO`, `Beyonce`
+and `Beyoncé` are not four rows the server is willing to hold: they are two.
+
+Matching aliases with Python's `==` therefore made the pass insert a spelling it
+believed missing, the upsert landed on the existing row and imposed its `DISPLAY_ORDER`,
+and the next run put the other spelling back. Around 26k writes per run, indefinitely,
+with no deletion to show for it.
+
+`person_names.f_aliaskey` is the fold that keeps Python and the server in agreement, and
+the pass looks an alias up by its **exact** spelling first, by the folded key only as a
+fallback. That order is deliberate: the fold does not claim to reproduce the collation
+exactly, and looking exact-first means a fold that is too aggressive can at worst skip an
+insert. It can never make the pass delete an alias the server was willing to keep.
+
+If you ever simplify that lookup back to a plain dictionary hit on `PERSON_NAME`, the
+two-runs-in-a-row check above will go red.
 
 ### Tracing
 

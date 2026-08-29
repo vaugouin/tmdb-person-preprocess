@@ -14,6 +14,7 @@ import re
 import sys
 from typing import Dict, Optional, List, Set
 from language_family import guess_language_family
+from person_names import build_person_names, split_also_known_as, f_aliaskey
 
 def check_memory():
     """Check and display system memory information"""
@@ -442,40 +443,6 @@ def process_value(val, is_integer=False):
     
     return val_str
 
-def split_also_known_as(value: Optional[str]) -> List[str]:
-    if not value:
-        return []
-    parts = [p.strip() for p in str(value).split('|')]
-    parts = [p for p in parts if p]
-
-    # Deduplicate while preserving order
-    seen: Set[str] = set()
-    out: List[str] = []
-    for p in parts:
-        if p not in seen:
-            seen.add(p)
-            out.append(p)
-    return out
-
-def build_person_names(name: Optional[str], also_known_as: Optional[str]) -> List[str]:
-    names: List[str] = []
-
-    if name:
-        primary_name = str(name).strip()
-        if primary_name:
-            names.append(primary_name)
-
-    names.extend(split_also_known_as(also_known_as))
-
-    # Deduplicate while preserving order, with NAME always first if present.
-    seen: Set[str] = set()
-    out: List[str] = []
-    for person_name in names:
-        if person_name not in seen:
-            seen.add(person_name)
-            out.append(person_name)
-    return out
-
 def f_samestoredvalue(dbvalue, newvalue):
     """Tell whether a stored column already holds the freshly computed value.
 
@@ -656,6 +623,8 @@ try:
                     try:
                         lng_persons_processed = 0
                         lng_aliases_upserted = 0
+                        lng_aliases_inserted = 0
+                        lng_aliases_updated = 0
                         lng_aliases_deleted = 0
                         lng_duplicates_removed = 0
                         lng_pages = 0
@@ -692,39 +661,63 @@ try:
                                 "WHERE ID_PERSON IN (" + strplaceholders + ") ORDER BY ID_ROW ASC",
                                 arrids
                             )
-                            arrexisting = {}   # ID_PERSON -> {PERSON_NAME: row}
-                            arrallrows = {}    # ID_PERSON -> [ID_ROW, ...], nameless rows included
-                            arrdelete = []
+                            # Existing rows are indexed twice: by their exact PERSON_NAME,
+                            # and by f_aliaskey. The exact index is authoritative and the
+                            # folded one is the fallback, because PERSON_NAME is
+                            # utf8mb4_unicode_ci under a UNIQUE key: the server keeps ONE row
+                            # for "Jean Reno" and "JEAN RENO". Matching on the exact string
+                            # alone made the pass insert the variant it believed missing, the
+                            # upsert landed on the existing row and imposed its DISPLAY_ORDER,
+                            # and the next run put the other one back. That was ~26k writes
+                            # per run, forever, with no deletion to show for it.
+                            #
+                            # The order matters in the other direction too. The collation folds
+                            # more than case (accents among others) and f_aliaskey cannot claim
+                            # to reproduce it exactly. Consulting the exact index first means a
+                            # fold that is too aggressive can at worst skip an insert; it can
+                            # never make the pass delete an alias the server was happy to keep.
+                            arrbyexact = {}    # ID_PERSON -> {PERSON_NAME: row}
+                            arrbyfold = {}     # ID_PERSON -> {alias key: first row}
+                            arrallrows = {}    # ID_PERSON -> [row, ...], nameless rows included
+                            setdelete = set()
                             for rowexisting in cursor3.fetchall():
-                                arrallrows.setdefault(rowexisting['ID_PERSON'], []).append(rowexisting['ID_ROW'])
+                                arrallrows.setdefault(rowexisting['ID_PERSON'], []).append(rowexisting)
                                 if not rowexisting.get('PERSON_NAME'):
                                     continue
-                                arrbyname = arrexisting.setdefault(rowexisting['ID_PERSON'], {})
-                                if rowexisting['PERSON_NAME'] in arrbyname:
-                                    # Duplicate (ID_PERSON, PERSON_NAME). The previous code kept
-                                    # the lowest ID_ROW and never looked at the copies again, so
-                                    # they accumulated forever; drop them here.
-                                    arrdelete.append(rowexisting['ID_ROW'])
+                                arrexact = arrbyexact.setdefault(rowexisting['ID_PERSON'], {})
+                                if rowexisting['PERSON_NAME'] in arrexact:
+                                    # Two rows with the very same name. The UNIQUE key added by
+                                    # migrations/add_unique_person_alias_key.py makes this
+                                    # impossible going forward, so this only catches leftovers.
+                                    setdelete.add(rowexisting['ID_ROW'])
                                     lng_duplicates_removed += 1
                                     continue
-                                arrbyname[rowexisting['PERSON_NAME']] = rowexisting
+                                arrexact[rowexisting['PERSON_NAME']] = rowexisting
+                                arrbyfold.setdefault(rowexisting['ID_PERSON'], {}).setdefault(
+                                    f_aliaskey(rowexisting['PERSON_NAME']), rowexisting)
 
                             arrinsert = []
                             arrupdate = []
                             for lngidperson, arraliases in arrdesired.items():
-                                arrbyname = arrexisting.get(lngidperson, {})
+                                arrexact = arrbyexact.get(lngidperson, {})
+                                arrfold = arrbyfold.get(lngidperson, {})
                                 if not arraliases:
-                                    arrdelete.extend(arrallrows.get(lngidperson, []))
+                                    setdelete.update(r['ID_ROW'] for r in arrallrows.get(lngidperson, []))
                                     continue
-                                setcurrent = set()
+                                setclaimed = set()
+                                setseen = set()
                                 for lngdisplayorder, stralias in enumerate(arraliases, start=1):
                                     stralias = stralias[:200]
-                                    if stralias in setcurrent:
-                                        # Two aliases collapsing onto the same 200 chars.
-                                        continue
-                                    setcurrent.add(stralias)
+                                    strkey = f_aliaskey(stralias)
+                                    rowexisting = arrexact.get(stralias)
+                                    if rowexisting is None:
+                                        if strkey in setseen:
+                                            # Another alias already occupies the only row the
+                                            # server will hold for this spelling.
+                                            continue
+                                        rowexisting = arrfold.get(strkey)
+                                    setseen.add(strkey)
                                     strlanguagefamily = guess_language_family(stralias)
-                                    rowexisting = arrbyname.get(stralias)
                                     if rowexisting is None:
                                         arrinsert.append({
                                             "ID_PERSON": lngidperson,
@@ -732,23 +725,29 @@ try:
                                             "LANGUAGE_FAMILY": strlanguagefamily,
                                             "DISPLAY_ORDER": lngdisplayorder,
                                         })
-                                    elif (rowexisting.get('LANGUAGE_FAMILY') != strlanguagefamily
+                                        continue
+                                    setclaimed.add(rowexisting['ID_ROW'])
+                                    if (rowexisting.get('LANGUAGE_FAMILY') != strlanguagefamily
                                             or rowexisting.get('DISPLAY_ORDER') != lngdisplayorder):
                                         # The row is there and already correct in the vast
                                         # majority of cases: only real drift is written.
+                                        # PERSON_NAME goes back as the server stores it, never
+                                        # as computed here, so a row reached through the folded
+                                        # index cannot start the flip-flop over again.
                                         arrupdate.append({
                                             "ID_ROW": rowexisting['ID_ROW'],
                                             "ID_PERSON": lngidperson,
-                                            "PERSON_NAME": stralias,
+                                            "PERSON_NAME": rowexisting['PERSON_NAME'],
                                             "LANGUAGE_FAMILY": strlanguagefamily,
                                             "DISPLAY_ORDER": lngdisplayorder,
                                         })
-                                for strname, rowexisting in arrbyname.items():
-                                    if strname not in setcurrent:
-                                        arrdelete.append(rowexisting['ID_ROW'])
+                                for rowexisting in arrallrows.get(lngidperson, []):
+                                    if (rowexisting.get('PERSON_NAME')
+                                            and rowexisting['ID_ROW'] not in setclaimed):
+                                        setdelete.add(rowexisting['ID_ROW'])
 
-                            if arrdelete:
-                                arrdelete = sorted(set(arrdelete))
+                            if setdelete:
+                                arrdelete = sorted(setdelete)
                                 for lngstart in range(0, len(arrdelete), 1000):
                                     arrchunk = arrdelete[lngstart:lngstart + 1000]
                                     strplaceholders = ", ".join(["%s"] * len(arrchunk))
@@ -764,23 +763,24 @@ try:
                                 # this degrades to a plain multi-row INSERT. That is correct
                                 # here because the diff above already established the rows do
                                 # not exist. See migrations/add_unique_person_alias_key.py.
-                                lng_aliases_upserted += cp.f_sqlbulkupsert(
+                                lng_aliases_inserted += cp.f_sqlbulkupsert(
                                     "T_WC_TMDB_PERSON_ALSO_KNOWN_AS", arrinsert,
                                     ["ID_PERSON", "PERSON_NAME"], 1, 500
                                 )
                             if arrupdate:
                                 # Keyed on ID_ROW (the primary key), so this is a true in-place
                                 # update and DAT_CREAT / ID_CREATOR are preserved.
-                                lng_aliases_upserted += cp.f_sqlbulkupsert(
+                                lng_aliases_updated += cp.f_sqlbulkupsert(
                                     "T_WC_TMDB_PERSON_ALSO_KNOWN_AS", arrupdate,
                                     ["ID_ROW"], 1, 500
                                 )
 
+                            lng_aliases_upserted = lng_aliases_inserted + lng_aliases_updated
                             if lng_pages % 10 == 0:
                                 cp.f_setservervariable("strtmdbpersonpreprocessalsoknownaspersons",str(lng_persons_processed),"Count of persons processed for ALSO_KNOWN_AS",0)
                                 cp.f_setservervariable("strtmdbpersonpreprocessalsoknownasupserted",str(lng_aliases_upserted),"Count of ALSO_KNOWN_AS aliases written (inserted or corrected)",0)
                                 cp.f_setservervariable("strtmdbpersonpreprocessalsoknownasdeleted",str(lng_aliases_deleted),"Count of ALSO_KNOWN_AS aliases deleted",0)
-                                print("ALSO_KNOWN_AS: " + str(lng_persons_processed) + " persons, " + str(lng_aliases_upserted) + " written, " + str(lng_aliases_deleted) + " deleted (up to ID_PERSON " + str(lnglastid) + ")", flush=True)
+                                print("ALSO_KNOWN_AS: " + str(lng_persons_processed) + " persons, " + str(lng_aliases_inserted) + " inserted, " + str(lng_aliases_updated) + " updated, " + str(lng_aliases_deleted) + " deleted (up to ID_PERSON " + str(lnglastid) + ")", flush=True)
 
                         cp.f_setservervariable(
                             "strtmdbpersonpreprocessalsoknownaspersons",
@@ -801,12 +801,24 @@ try:
                             0
                         )
                         cp.f_setservervariable(
+                            "strtmdbpersonpreprocessalsoknownasinserted",
+                            str(lng_aliases_inserted),
+                            "Count of ALSO_KNOWN_AS aliases inserted",
+                            0
+                        )
+                        cp.f_setservervariable(
+                            "strtmdbpersonpreprocessalsoknownasupdated",
+                            str(lng_aliases_updated),
+                            "Count of ALSO_KNOWN_AS aliases corrected in place",
+                            0
+                        )
+                        cp.f_setservervariable(
                             "strtmdbpersonpreprocessalsoknownasduplicates",
                             str(lng_duplicates_removed),
                             "Count of duplicate (ID_PERSON, PERSON_NAME) alias rows removed",
                             0
                         )
-                        print("\nALSO_KNOWN_AS done: " + str(lng_persons_processed) + " persons, " + str(lng_aliases_upserted) + " aliases written, " + str(lng_aliases_deleted) + " deleted (" + str(lng_duplicates_removed) + " of them duplicates)")
+                        print("\nALSO_KNOWN_AS done: " + str(lng_persons_processed) + " persons, " + str(lng_aliases_inserted) + " inserted, " + str(lng_aliases_updated) + " updated, " + str(lng_aliases_deleted) + " deleted (" + str(lng_duplicates_removed) + " of them duplicates)")
                     except pymysql.MySQLError as e:
                         print(f"Database error: {e}")
                     except Exception as e:

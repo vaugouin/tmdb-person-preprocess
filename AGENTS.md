@@ -60,6 +60,24 @@ stored value and send only real changes. Reintroducing an unconditional rewrite 
 a few-minute run back into a multi-hour one and, through `TIM_UPDATED`, breaks the
 crawler downstream.
 
+## A differential pass must be a no-op on its second run
+
+Whatever you change in either pass, run the pipeline twice in a row with nothing else
+touching the database, and check the second run writes zero rows. A pass that writes on
+a database it has just converged is fighting itself, not reacting to a change.
+
+The defect that made this rule explicit: aliases were matched with Python's `==` while
+the server holds one row per `(ID_PERSON, PERSON_NAME)` under `utf8mb4_unicode_ci`,
+which folds case and Latin diacritics. `Jean Reno` and `JEAN RENO` are one row, so the
+pass inserted the spelling it believed missing, the upsert imposed its `DISPLAY_ORDER`
+on the existing row, and the next run put the other spelling back. Roughly 26k writes
+per run with zero deletions, invisible in any single run's output.
+
+`person_names.f_aliaskey` is the fold that keeps both sides in agreement. Look an alias
+up by its exact spelling first and by the folded key only as a fallback: the fold cannot
+claim to reproduce the collation exactly, and that order means a fold that is too
+aggressive skips an insert rather than deleting a legitimate alias.
+
 ## Code conventions
 
 - **Hungarian notation** for variables (legacy style):
@@ -117,7 +135,7 @@ This preprocessor is built and run as a Docker container via the repo's root `Do
 
 ---
 
-**Last Updated**: 2026-08-28
+**Last Updated**: 2026-08-29
 **Current Version**: 1.0.0 
 
 ## Backlog (Nestor second-brain)
