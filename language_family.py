@@ -11,8 +11,46 @@ def _contains_any_in_ranges(s: str, ranges: List[range]) -> bool:
     return False
 
 
+# Letters that separate three languages sharing the Arabic script. They all live inside
+# the Arabic blocks, so a range test cannot tell them apart: only the presence of one of
+# these code points can. Absence proves nothing, a Persian name spelled without any of
+# them is indistinguishable from Arabic and stays "Arabic".
+PERSIAN_LETTERS = frozenset({
+    0x067E,  # پ pe
+    0x0686,  # چ che
+    0x0698,  # ژ zhe
+    0x06A9,  # ک keheh, the Persian kaf, against the Arabic ك U+0643
+    0x06AF,  # گ gaf
+    0x06CC,  # ی farsi yeh, against the Arabic ي U+064A
+})
+
+# Urdu uses the Persian letters above and adds its own. Tested first, otherwise every
+# Urdu name would answer "Persian" and the split would trade one wrong label for another.
+URDU_LETTERS = frozenset({
+    0x0679,  # ٹ tteh
+    0x0688,  # ڈ ddal
+    0x0691,  # ڑ rreh
+    0x06BA,  # ں noon ghunna
+    0x06BE,  # ھ heh doachashmee
+    0x06C1,  # ہ heh goal, absent from Arabic and Persian, which write ه
+    0x06C2,  # ۂ heh goal with hamza above
+    0x06D2,  # ے yeh barree
+    0x06D3,  # ۓ yeh barree with hamza above
+})
+
+
+def _contains_any_in_set(s: str, codepoints: frozenset) -> bool:
+    """Return whether any character in ``s`` is one of the given code points."""
+    return any(ord(ch) in codepoints for ch in s)
+
+
 def guess_language_family(person_name: str) -> str:
-    """Guess a broad script or language family from the Unicode characters in a name."""
+    """Guess a broad script or language family from the Unicode characters in a name.
+
+    Scripts are recognised by Unicode block, which is enough everywhere except the Arabic
+    block, where Arabic, Persian and Urdu share the same ranges and are separated by the
+    letters each language adds. See ``PERSIAN_LETTERS`` and ``URDU_LETTERS``.
+    """
     if not person_name:
         return ""
 
@@ -78,6 +116,11 @@ def guess_language_family(person_name: str) -> str:
     if has_georgian:
         return "Georgian"
     if has_arabic:
+        # Same script, three languages. Most specific first.
+        if _contains_any_in_set(s, URDU_LETTERS):
+            return "Urdu"
+        if _contains_any_in_set(s, PERSIAN_LETTERS):
+            return "Persian"
         return "Arabic"
     if has_hebrew:
         return "Hebrew"
