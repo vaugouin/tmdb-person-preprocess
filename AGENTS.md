@@ -25,7 +25,7 @@ Pipeline stages:
 - **Serving** — `fastapi-text2sql` (NL→SQL API + MCP server), `voice-agent`, `tmdb-front` (PHP web front-end).
 - **Evaluation** — `eval-text2sql`, `extract-movie-questions`.
 - **Maintenance & tooling** — `plex-duplicates`, `subtitle-translate`, `powershell`, `playwright-test`.
-- **Monitoring & observability** — `data-monitoring`.
+- **Monitoring & observability** — `data-monitoring`, `pipeline-3d` (three.js replay of one question's execution trace through `voice-agent` and `fastapi-text2sql`).
 
 **This repository's role:** Preprocessing stage. Enriches person records — country-of-birth parsing and alias normalization — writing back to the `T_WC_TMDB_PERSON*` tables. Runs alongside `tmdb-movie-preprocess` and `keywords-processing` to prepare the `T_WC_T2S_*` read-model consumed by `fastapi-text2sql`.
 
