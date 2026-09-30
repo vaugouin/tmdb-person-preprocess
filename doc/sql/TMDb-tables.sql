@@ -781,6 +781,8 @@ CREATE TABLE `T_WC_TMDB_MOVIE` (
   `DAT_WIKIPEDIA_FORMAT_LINE` datetime DEFAULT NULL,
   `IS_COLOR` int(11) DEFAULT NULL,
   `IS_BLACK_AND_WHITE` int(11) DEFAULT NULL,
+  `COLOR_SOURCE` varchar(20) DEFAULT NULL,
+  `TIM_COLOR_SOURCE` datetime DEFAULT NULL,
   `IS_SILENT` int(11) DEFAULT NULL,
   `IS_3D` int(11) DEFAULT NULL,
   `COLOR_TECHNOLOGY` varchar(100) DEFAULT NULL,
@@ -850,7 +852,9 @@ CREATE TABLE `T_WC_TMDB_MOVIE` (
   KEY `DAT_WIKIPEDIA_FORMAT_LINE` (`DAT_WIKIPEDIA_FORMAT_LINE`),
   KEY `TIM_VIDEOS_COMPLETED` (`TIM_VIDEOS_COMPLETED`),
   KEY `TIM_RELEASE_DATES_COMPLETED` (`TIM_RELEASE_DATES_COMPLETED`),
-  KEY `TIM_WATCH_PROVIDERS_COMPLETED` (`TIM_WATCH_PROVIDERS_COMPLETED`)
+  KEY `TIM_WATCH_PROVIDERS_COMPLETED` (`TIM_WATCH_PROVIDERS_COMPLETED`),
+  KEY `COLOR_SOURCE` (`COLOR_SOURCE`),
+  KEY `TIM_COLOR_SOURCE` (`TIM_COLOR_SOURCE`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -1336,7 +1340,8 @@ CREATE TABLE `T_WC_TMDB_MOVIE_WATCH_PROVIDER` (
   KEY `COUNTRY_CODE` (`COUNTRY_CODE`),
   KEY `MONETIZATION_TYPE` (`MONETIZATION_TYPE`),
   KEY `ID_PROVIDER` (`ID_PROVIDER`),
-  KEY `TIM_PROVIDER_UPDATED` (`TIM_PROVIDER_UPDATED`)
+  KEY `TIM_PROVIDER_UPDATED` (`TIM_PROVIDER_UPDATED`),
+  KEY `IX_MWP_PROVIDER_COUNTRY` (`ID_PROVIDER`,`COUNTRY_CODE`,`ID_MOVIE`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -1509,6 +1514,7 @@ CREATE TABLE `T_WC_TMDB_PERSON_ALSO_KNOWN_AS` (
   `PERSON_NAME_NORM` varchar(255) GENERATED ALWAYS AS (lcase(regexp_replace(regexp_replace(`PERSON_NAME`,'[^\\p{L}\\p{N} ]+',' '),' +',' '))) STORED,
   `PERSON_NAME_KEY` varchar(255) GENERATED ALWAYS AS (replace(`PERSON_NAME_NORM`,' ','')) STORED,
   PRIMARY KEY (`ID_ROW`),
+  UNIQUE KEY `UQ_TMDB_PERSON_ALSO_KNOWN_AS_PERSON_NAME` (`ID_PERSON`,`PERSON_NAME`),
   KEY `DELETED` (`DELETED`),
   KEY `ID_PERSON` (`ID_PERSON`),
   KEY `DISPLAY_ORDER` (`DISPLAY_ORDER`),
@@ -1895,6 +1901,60 @@ CREATE TABLE `T_WC_TMDB_PLEX_MEDIA_PART` (
   KEY `PART_SIZE` (`PART_SIZE`),
   KEY `PART_DURATION` (`PART_DURATION`),
   KEY `EXTRA_DATA` (`EXTRA_DATA`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8 */;
+CREATE TABLE `T_WC_TMDB_PLEX_MEDIA_STREAM` (
+  `ID_PLEX_MEDIA_STREAM` int(11) NOT NULL COMMENT 'media_streams.id',
+  `ID_PLEX_MEDIA` int(11) DEFAULT NULL COMMENT 'media_streams.media_item_id -> T_WC_TMDB_PLEX_MEDIA',
+  `ID_PLEX_MEDIA_PART` int(11) DEFAULT NULL COMMENT 'media_streams.media_part_id -> T_WC_TMDB_PLEX_MEDIA_PART',
+  `STREAM_TYPE` int(5) DEFAULT NULL COMMENT '1 video, 2 audio, 3 sous-titre',
+  `STREAM_TYPE_TEXT` varchar(20) DEFAULT NULL COMMENT 'video, audio, subtitle',
+  `STREAM_INDEX` int(5) DEFAULT NULL COMMENT 'rang de la piste dans le conteneur, NULL pour un sous-titre externe',
+  `CODEC` varchar(50) DEFAULT NULL,
+  `LANGUAGE` varchar(50) DEFAULT NULL COMMENT 'valeur brute de Plex',
+  `LANGUAGE_ISO` varchar(10) DEFAULT NULL COMMENT 'ISO 639-1 deduit de LANGUAGE, NULL si inconnue',
+  `CHANNELS` int(5) DEFAULT NULL,
+  `CHANNEL_LAYOUT` varchar(50) DEFAULT NULL COMMENT 'extra_data ma:audioChannelLayout, ex. 5.1(side)',
+  `BITRATE` int(11) DEFAULT NULL,
+  `SAMPLING_RATE` int(11) DEFAULT NULL COMMENT 'extra_data ma:samplingRate',
+  `BIT_DEPTH` int(5) DEFAULT NULL COMMENT 'extra_data ma:bitDepth',
+  `PROFILE` varchar(100) DEFAULT NULL COMMENT 'extra_data ma:profile',
+  `TRACK_TITLE` varchar(255) DEFAULT NULL COMMENT 'extra_data ma:title, ex. DTS HD-MA, French',
+  `IS_DEFAULT` tinyint(1) DEFAULT NULL,
+  `IS_FORCED` tinyint(1) DEFAULT NULL,
+  `IS_EXTERNAL` tinyint(1) DEFAULT NULL COMMENT '1 pour un sous-titre hors du conteneur (url non vide)',
+  `IS_HEARING_IMPAIRED` tinyint(1) DEFAULT NULL COMMENT 'extra_data ma:hearingImpaired',
+  `IS_DUB` tinyint(1) DEFAULT NULL COMMENT 'extra_data ma:dub',
+  `IS_ORIGINAL` tinyint(1) DEFAULT NULL COMMENT 'extra_data ma:original',
+  `EXTERNAL_FORMAT` varchar(20) DEFAULT NULL COMMENT 'extra_data ma:format, en minuscules : srt, idx, ass, ssa',
+  `EXTERNAL_PATH` varchar(600) DEFAULT NULL COMMENT 'chemin NAS du fichier externe, url decodee sans file://',
+  `EXTRA_DATA` text DEFAULT NULL COMMENT 'JSON brut de Plex, pour les cles non lues aujourd hui',
+  `DELETED` int(5) DEFAULT NULL,
+  `DISPLAY_ORDER` int(5) DEFAULT NULL,
+  `ID_CREATOR` int(5) DEFAULT NULL,
+  `DAT_CREAT` date DEFAULT NULL,
+  `ID_OWNER` int(5) DEFAULT NULL,
+  `TIM_UPDATED` datetime DEFAULT NULL,
+  `ID_USER_UPDATED` int(5) DEFAULT NULL,
+  PRIMARY KEY (`ID_PLEX_MEDIA_STREAM`),
+  KEY `ID_PLEX_MEDIA` (`ID_PLEX_MEDIA`),
+  KEY `ID_PLEX_MEDIA_PART` (`ID_PLEX_MEDIA_PART`),
+  KEY `STREAM_TYPE` (`STREAM_TYPE`),
+  KEY `CODEC` (`CODEC`),
+  KEY `LANGUAGE` (`LANGUAGE`),
+  KEY `LANGUAGE_ISO` (`LANGUAGE_ISO`),
+  KEY `IS_EXTERNAL` (`IS_EXTERNAL`),
+  KEY `IS_FORCED` (`IS_FORCED`),
+  KEY `MEDIA_TYPE_LANGUAGE` (`ID_PLEX_MEDIA`,`STREAM_TYPE`,`LANGUAGE_ISO`),
+  KEY `DELETED` (`DELETED`),
+  KEY `DISPLAY_ORDER` (`DISPLAY_ORDER`),
+  KEY `ID_OWNER` (`ID_OWNER`),
+  KEY `ID_CREATOR` (`ID_CREATOR`),
+  KEY `ID_USER_UPDATED` (`ID_USER_UPDATED`),
+  KEY `TIM_UPDATED` (`TIM_UPDATED`),
+  KEY `DAT_CREAT` (`DAT_CREAT`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -2648,7 +2708,8 @@ CREATE TABLE `T_WC_TMDB_SERIE_WATCH_PROVIDER` (
   KEY `COUNTRY_CODE` (`COUNTRY_CODE`),
   KEY `MONETIZATION_TYPE` (`MONETIZATION_TYPE`),
   KEY `ID_PROVIDER` (`ID_PROVIDER`),
-  KEY `TIM_PROVIDER_UPDATED` (`TIM_PROVIDER_UPDATED`)
+  KEY `TIM_PROVIDER_UPDATED` (`TIM_PROVIDER_UPDATED`),
+  KEY `IX_SWP_PROVIDER_COUNTRY` (`ID_PROVIDER`,`COUNTRY_CODE`,`ID_SERIE`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
