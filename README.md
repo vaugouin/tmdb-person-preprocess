@@ -159,6 +159,7 @@ kill the job halfway.
 | --- | --- | --- |
 | [`add_unique_person_alias_key.py`](migrations/add_unique_person_alias_key.py) | Deduplicates `T_WC_TMDB_PERSON_ALSO_KNOWN_AS` on `(ID_PERSON, PERSON_NAME)` and adds the missing `UNIQUE` key, so duplicate aliases cannot come back | Applied 2026-08-28 (729 groups, 737 rows removed) |
 | [`clear_none_place_of_birth.py`](migrations/clear_none_place_of_birth.py) | Turns the literal text `"None"` back into SQL `NULL` in `PLACE_OF_BIRTH` and `COUNTRY_OF_BIRTH_LONG` | Run **after** the `tmdb-crawler` fix is deployed |
+| [`keep_marks_in_alias_norm.py`](migrations/keep_marks_in_alias_norm.py) | Adds `\p{M}` to the class of the generated `PERSON_NAME_NORM` (and rebuilds `PERSON_NAME_KEY`) of `T_WC_TMDB_PERSON_ALSO_KNOWN_AS`, so the vowel signs of Devanagari, Thai, Kannada and the other abugidas stop turning into spaces (TMDB-PERSON-PREPROCESS-008). Full table rebuild: time it first with `--rehearse`, which runs the `ALTER` on a throw-away copy. Switch off `tmdb-movie-preprocess` too, its Process 51 reads this table | To run; then `tmdb-movie-preprocess` Process 51 and an API restart |
 
 #### About the `"None"` cleanup
 
