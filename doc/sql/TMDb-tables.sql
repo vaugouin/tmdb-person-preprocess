@@ -1511,7 +1511,7 @@ CREATE TABLE `T_WC_TMDB_PERSON_ALSO_KNOWN_AS` (
   `ID_OWNER` int(5) DEFAULT NULL,
   `TIM_UPDATED` datetime DEFAULT NULL,
   `ID_USER_UPDATED` int(5) DEFAULT NULL,
-  `PERSON_NAME_NORM` varchar(255) GENERATED ALWAYS AS (lcase(regexp_replace(regexp_replace(`PERSON_NAME`,'[^\\p{L}\\p{N} ]+',' '),' +',' '))) STORED,
+  `PERSON_NAME_NORM` varchar(255) GENERATED ALWAYS AS (lcase(regexp_replace(regexp_replace(`PERSON_NAME`,'[^\\p{L}\\p{M}\\p{N} ]+',' '),' +',' '))) STORED,
   `PERSON_NAME_KEY` varchar(255) GENERATED ALWAYS AS (replace(`PERSON_NAME_NORM`,' ','')) STORED,
   PRIMARY KEY (`ID_ROW`),
   UNIQUE KEY `UQ_TMDB_PERSON_ALSO_KNOWN_AS_PERSON_NAME` (`ID_PERSON`,`PERSON_NAME`),
@@ -1885,6 +1885,19 @@ CREATE TABLE `T_WC_TMDB_PLEX_MEDIA_PART` (
   `ID_OWNER` int(5) DEFAULT NULL,
   `TIM_UPDATED` datetime DEFAULT NULL,
   `ID_USER_UPDATED` int(5) DEFAULT NULL,
+  `FILE_FOLDER_CLASS` varchar(50) DEFAULT NULL COMMENT 'dossier sous video/ : Films, HDFilms, 4KFilms, HDSeries...',
+  `FILE_EXTENSION` varchar(10) DEFAULT NULL COMMENT 'extension en minuscules : mkv, mp4, avi...',
+  `FILE_QUALITY_TEXT` varchar(10) DEFAULT NULL COMMENT 'qualite ANNONCEE par le nom : 2160p, 1080p, 720p, 576p, 480p ; a confronter a MEDIA.QUALITY',
+  `FILE_LIGHT` tinyint(1) DEFAULT NULL COMMENT '1 pour un reencodage leger : HDLight, 4KLight, mHD',
+  `FILE_SOURCE` varchar(20) DEFAULT NULL COMMENT 'BluRay, REMUX, WEB-DL, WEBRip, DVDRip, HDTV...',
+  `FILE_VIDEO_CODEC` varchar(20) DEFAULT NULL COMMENT 'H.264, H.265, AV1, XviD... (x264 et x265 normalises)',
+  `FILE_HDR` varchar(30) DEFAULT NULL COMMENT 'DV, HDR10+, HDR10, HDR, separes par un espace',
+  `FILE_EDITION` varchar(255) DEFAULT NULL COMMENT 'editions, separees par une virgule : Criterion, Remastered, {edition-...} de Plex',
+  `FILE_IMDB_ID` varchar(12) DEFAULT NULL COMMENT 'identifiant IMDb ecrit dans le nom : tt0062622',
+  `FILE_TEAM` varchar(20) DEFAULT NULL COMMENT 'equipe de release : RARBG, YTS, VXT...',
+  `FILE_PART_NUMBER` int(5) DEFAULT NULL COMMENT 'numero de partie : CD1, Disc 2 (jamais Part 1, qui est un titre)',
+  `FILE_QUALITY_CONTRADICTED` tinyint(1) DEFAULT NULL COMMENT '1 si le nom annonce plus que la resolution (marge 10 %), 0 sinon, NULL si resolution inconnue',
+  `FILE_FOLDER_CONTRADICTED` tinyint(1) DEFAULT NULL COMMENT '1 si le dossier promet une qualite absente (4K*, HD*, Films, Series), 0 sinon, NULL si resolution inconnue',
   PRIMARY KEY (`ID_PLEX_MEDIA_PART`),
   KEY `ID_PLEX_MEDIA` (`ID_PLEX_MEDIA`),
   KEY `DELETED` (`DELETED`),
@@ -1900,7 +1913,36 @@ CREATE TABLE `T_WC_TMDB_PLEX_MEDIA_PART` (
   KEY `ID_PLEX_DIRECTORY` (`ID_PLEX_DIRECTORY`),
   KEY `PART_SIZE` (`PART_SIZE`),
   KEY `PART_DURATION` (`PART_DURATION`),
-  KEY `EXTRA_DATA` (`EXTRA_DATA`)
+  KEY `EXTRA_DATA` (`EXTRA_DATA`),
+  KEY `FILE_FOLDER_CLASS` (`FILE_FOLDER_CLASS`),
+  KEY `FILE_QUALITY_TEXT` (`FILE_QUALITY_TEXT`),
+  KEY `FILE_SOURCE` (`FILE_SOURCE`),
+  KEY `FILE_IMDB_ID` (`FILE_IMDB_ID`),
+  KEY `FILE_TEAM` (`FILE_TEAM`),
+  KEY `FILE_QUALITY_CONTRADICTED` (`FILE_QUALITY_CONTRADICTED`),
+  KEY `FILE_FOLDER_CONTRADICTED` (`FILE_FOLDER_CONTRADICTED`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8 */;
+CREATE TABLE `T_WC_TMDB_PLEX_MEDIA_PART_TAG` (
+  `ID_PLEX_MEDIA_PART_TAG` int(11) NOT NULL AUTO_INCREMENT,
+  `ID_PLEX_MEDIA_PART` int(11) NOT NULL COMMENT '-> T_WC_TMDB_PLEX_MEDIA_PART',
+  `TAG_FAMILY` varchar(30) NOT NULL COMMENT 'audio_language, subtitle_language, edition, hdr, audio_codec, platform, release_flag, bit_depth, noise',
+  `TAG_RAW` varchar(100) DEFAULT NULL COMMENT 'le texte tel qu il est ecrit dans le nom : MULTi, VFF, VOSTFR',
+  `TAG_VALUE` varchar(100) NOT NULL COMMENT 'valeur normalisee ; pour les langues, code ISO 639-1 ou original (la VO, langue non dite)',
+  `DELETED` int(5) DEFAULT NULL,
+  `DISPLAY_ORDER` int(5) DEFAULT NULL,
+  `ID_CREATOR` int(5) DEFAULT NULL,
+  `DAT_CREAT` date DEFAULT NULL,
+  `ID_OWNER` int(5) DEFAULT NULL,
+  `TIM_UPDATED` datetime DEFAULT NULL,
+  `ID_USER_UPDATED` int(5) DEFAULT NULL,
+  PRIMARY KEY (`ID_PLEX_MEDIA_PART_TAG`),
+  UNIQUE KEY `UK_PART_FAMILY_VALUE` (`ID_PLEX_MEDIA_PART`,`TAG_FAMILY`,`TAG_VALUE`),
+  KEY `FAMILY_VALUE` (`TAG_FAMILY`,`TAG_VALUE`),
+  KEY `DELETED` (`DELETED`),
+  KEY `TIM_UPDATED` (`TIM_UPDATED`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -1915,6 +1957,7 @@ CREATE TABLE `T_WC_TMDB_PLEX_MEDIA_STREAM` (
   `CODEC` varchar(50) DEFAULT NULL,
   `LANGUAGE` varchar(50) DEFAULT NULL COMMENT 'valeur brute de Plex',
   `LANGUAGE_ISO` varchar(10) DEFAULT NULL COMMENT 'ISO 639-1 deduit de LANGUAGE, NULL si inconnue',
+  `LANGUAGE_ISO_SOURCE` varchar(10) DEFAULT NULL COMMENT 'plex, filename (lue dans le nom du sous-titre externe), NULL si inconnue',
   `CHANNELS` int(5) DEFAULT NULL,
   `CHANNEL_LAYOUT` varchar(50) DEFAULT NULL COMMENT 'extra_data ma:audioChannelLayout, ex. 5.1(side)',
   `BITRATE` int(11) DEFAULT NULL,
@@ -1954,7 +1997,8 @@ CREATE TABLE `T_WC_TMDB_PLEX_MEDIA_STREAM` (
   KEY `ID_CREATOR` (`ID_CREATOR`),
   KEY `ID_USER_UPDATED` (`ID_USER_UPDATED`),
   KEY `TIM_UPDATED` (`TIM_UPDATED`),
-  KEY `DAT_CREAT` (`DAT_CREAT`)
+  KEY `DAT_CREAT` (`DAT_CREAT`),
+  KEY `LANGUAGE_ISO_SOURCE` (`LANGUAGE_ISO_SOURCE`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
