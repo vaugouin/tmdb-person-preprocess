@@ -159,8 +159,8 @@ This preprocessor is built and run as a Docker container via the repo's root `Do
 
 ---
 
-**Last Updated**: 2026-08-29
-**Current Version**: 1.0.1 
+**Last Updated**: 2026-10-17
+**Current Version**: 1.0.2 
 
 ## Backlog (Nestor second-brain)
 

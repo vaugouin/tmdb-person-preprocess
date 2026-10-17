@@ -28,6 +28,15 @@ def check_memory():
     return memory_info.available / (1024 ** 3)
 
 # Global lookup dictionary that will be populated once and used for all lookups
+# LLM-TASKS-005 / LLM-TASKS-012 (2026-10-17): the place-of-birth to ISO code fallback moves from
+# gpt-4o (retired by OpenAI on 2027-01-14) to gpt-6-luna. Compared on 60 hard inputs with the same
+# prompt: 49 identical; Luna returns nothing on the split or ambiguous cases the prompt asks to drop
+# (Yugoslavia, British India, Prussia, Korea, Congo, Basque Country), finds Texas -> US and keeps
+# Puerto Rico -> PR, and answers "EU" for "EU", which the code below rejects.
+STRCOUNTRYLLMMODEL = "gpt-6-luna"
+# Two-letter answers that are not countries (ISO 3166-1 reserved codes).
+SETNONCOUNTRYCODES = {"EU", "EZ", "UN", "XK", "ZZ"}
+
 country_lookup_dict: Dict[str, str] = {}
 is_initialized: bool = False
 #intaskllm: bool = True
@@ -374,8 +383,9 @@ Input: {input_str}"""
             
             # Make a direct call to OpenAI API
             response = client.chat.completions.create(
-                model="gpt-4o",  # Using GPT-4o for better accuracy
-                temperature=0,  # Use deterministic output
+                model=STRCOUNTRYLLMMODEL,
+                # GPT-6 models refuse an explicit temperature; low effort is enough for a closed lookup.
+                reasoning_effort="low",
                 messages=[
                     {"role": "system", "content": "You are a country code identifier. Respond only with the ISO 3166-1 alpha-2 country code, no explanations."},
                     {"role": "user", "content": prompt}
@@ -389,7 +399,7 @@ Input: {input_str}"""
             country_code = response.choices[0].message.content.strip()
             
             # Validate that the response is a valid 2-letter country code (ISO 3166-1 alpha-2)
-            if re.match(r'^[A-Z]{2}$', country_code):
+            if re.match(r'^[A-Z]{2}$', country_code) and country_code not in SETNONCOUNTRYCODES:
                 # Cache the result for future use
                 _llm_cache[normalized_input] = country_code
                 return country_code
