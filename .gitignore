@@ -10,3 +10,6 @@ extract-country-of-birth.py
 # Python bytecode (already excluded from the image by .dockerignore)
 __pycache__/
 *.pyc
+
+# Flag file written by off.sh, removed by on.sh: the scheduled task is switched off
+CRON_OFF
