@@ -10,7 +10,7 @@ For agent / contributor conventions see [AGENTS.md](AGENTS.md).
 
 ### Secrets handling
 
-**Secrets are never baked into the image.** The Dockerfile contains only non-sensitive defaults; secrets are injected at runtime from a host-managed env file that lives **outside** the application source tree.
+**Secrets are never baked into the image.** The Dockerfile contains only non-sensitive defaults; secrets are injected at runtime from a host-managed env file, git-ignored and kept out of the build context.
 
 - [`.dockerignore`](.dockerignore) excludes `.env` from the build context, so local environment files cannot end up in image layers, the build cache, or any registry.
 - The Dockerfile does **not** `COPY .env` and does **not** declare secret `ENV` values.
@@ -20,17 +20,17 @@ For agent / contributor conventions see [AGENTS.md](AGENTS.md).
   --env-file /home/debian/docker/tmdb-person-preprocess/.env
   ```
 
-Keep the host env file outside the repository working tree (e.g. under `/home/debian/docker/tmdb-person-preprocess/.env`), readable only by the user that runs the container.
+Keep the host env file (e.g. `/home/debian/docker/tmdb-person-preprocess/.env`, at the root of the VPS clone that `tmdb-person-preprocess.sh` builds from) readable only by the user that runs the container.
 
 ### Required environment variables
 
-The container expects the following variables to be present in the host env file:
+The container reads the following variables from the host env file (template: [`.env.example`](.env.example)):
 
 | Variable | Purpose |
 | --- | --- |
 | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_NAMESPACE` | Database connection (see `citizenphil.py`) |
-| `TMDB_API_DOMAIN_URL`, `TMDB_API_KEY`, `TMDB_API_TOKEN` | TMDb API access |
-| `OPENAI_API_KEY` | OpenAI API key used by the Text2SQL conversion path |
+| `TMDB_API_DOMAIN_URL`, `TMDB_API_KEY`, `TMDB_API_TOKEN` | TMDb API access, read by the shared `citizenphil.py` but not used by this pipeline (absent from `.env.example`) |
+| `OPENAI_API_KEY` | OpenAI API key for the LLM fallback of `f_countrylookup` (`ask_llm_for_country_code`), switched off by default (`intaskllm = False`) |
 | `USER_TIMEZONE` | IANA timezone string, e.g. `Europe/Paris` |
 
 ### Build and run
@@ -159,6 +159,7 @@ kill the job halfway.
 | --- | --- | --- |
 | [`add_unique_person_alias_key.py`](migrations/add_unique_person_alias_key.py) | Deduplicates `T_WC_TMDB_PERSON_ALSO_KNOWN_AS` on `(ID_PERSON, PERSON_NAME)` and adds the missing `UNIQUE` key, so duplicate aliases cannot come back | Applied 2026-08-28 (729 groups, 737 rows removed) |
 | [`clear_none_place_of_birth.py`](migrations/clear_none_place_of_birth.py) | Turns the literal text `"None"` back into SQL `NULL` in `PLACE_OF_BIRTH` and `COUNTRY_OF_BIRTH_LONG` | Run **after** the `tmdb-crawler` fix is deployed |
+| [`reclassify_arabic_script_families.py`](migrations/reclassify_arabic_script_families.py) | Re-runs the language-family guess on the aliases filed as `Arabic` in `T_WC_TMDB_PERSON_ALSO_KNOWN_AS` and moves to `Persian` or `Urdu` those carrying a letter specific to them (TMDB-PERSON-PREPROCESS-007) | Not recorded in the script |
 | [`keep_marks_in_alias_norm.py`](migrations/keep_marks_in_alias_norm.py) | Adds `\p{M}` to the class of the generated `PERSON_NAME_NORM` (and rebuilds `PERSON_NAME_KEY`) of `T_WC_TMDB_PERSON_ALSO_KNOWN_AS`, so the vowel signs of Devanagari, Thai, Kannada and the other abugidas stop turning into spaces (TMDB-PERSON-PREPROCESS-008). Full table rebuild: time it first with `--rehearse`, which runs the `ALTER` on a throw-away copy. Switch off `tmdb-movie-preprocess` too, its Process 51 reads this table | To run; then `tmdb-movie-preprocess` Process 51 and an API restart |
 
 #### About the `"None"` cleanup

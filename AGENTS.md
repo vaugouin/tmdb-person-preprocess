@@ -1,188 +1,68 @@
 # AGENTS.md - Agent Guide for TMDb Person Preprocess
 
-This file gives you the agentic context you need to work on this codebase safely. For project overview, features, install / deploy steps and human-facing security / performance / troubleshooting material, read @README.md — that file is canonical and not duplicated here.
-
-This is the single canonical guide for autonomous coding agents in this repository. Assistant-specific files such as @CLAUDE.md, and any future tool-specific guide such as `GEMINI.md`, should only point here and should not duplicate repository instructions.
-
-Deeper specs live in their own files:
-- @doc/sql/*.sql — reference DDL for the database schema; treat these files as read-only unless the user explicitly asks you to edit schema documentation
-
-- For any project update, keep documentation aligned:
-  - Update `README.md` for user-facing behavior, configuration, setup, deployment, troubleshooting, or verification changes.
-  - Update this file only when agent workflow or safety context changes.
+Rules an agent needs to work on this codebase safely. Docker usage, secrets, server variables, migrations and the reasoning behind the write behaviour live in @README.md, which is canonical: update it for any user-facing change, and update this file only when agent workflow or safety context changes. `CLAUDE.md` and any other tool-specific file only point here.
 
 ---
 
 ## Related repositories (project ecosystem)
 
-`tmdb-person-preprocess` is one stage of **Agent BBB**, a multi-repository movie/TV database system owned by GitHub user `vaugouin`. All sibling repos live under `%USERPROFILE%/Code/<repo>` and at `github.com/vaugouin/<repo>`; they are interdependent stages of one pipeline that converges on a shared MySQL/MariaDB database (`T_WC_*` tables) and a ChromaDB vector store. The canonical roster of sibling repositories is kept in `%USERPROFILE%/Nestor/projets/t2s-backlog/topics/related-repositories.txt` (documentation repo `Nestor`, outside `Code/`).
-
-Pipeline stages:
-- **Infrastructure** — `chromadb` (vector service), `reverseproxy` (NGINX TLS ingress), `chromadb-security-test` (firewall validation), `tools` (host-side operational scripts for the shared MariaDB: backups per perimeter, one-off `.sql` runs; **private repo**, it documents where the database lives and how it is restored).
-- **Acquisition** — `tmdb-crawler`, `imdb-crawler`, `sparql-crawler`, `sparql-movies-persons`, `wikidata-crawler`, `wikipedia-crawler`, `selenium-tmdb`, `download-images`, `sqlite-plex-to-tmdb`, `movieparadise`, `open-credits` (crowdsourced OCR of on-screen credits into `T_WC_OC_*`).
-- **Preprocessing → `T_WC_T2S_*`** — `tmdb-movie-preprocess`, `tmdb-person-preprocess`, `keywords-processing`.
-- **Semantic index & name resolution** — `embedding-update`, `embedding-query`, `rapidfuzz_query`.
-- **Serving** — `fastapi-text2sql` (NL→SQL API + MCP server), `voice-agent`, `tmdb-front` (PHP web front-end).
-- **Evaluation** — `text2sql-eval`, `extract-movie-questions`.
-- **Maintenance & tooling** — `plex-duplicates`, `subtitle-translate`, `powershell`, `playwright-test`, `manual-refresh` (one-entity TMDb + Wikipedia refresh console, formerly `python`).
-- **Monitoring & observability** — `data-monitoring`, `pipeline-3d` (three.js replay of one question's execution trace through `voice-agent` and `fastapi-text2sql`).
-
-**This repository's role:** Preprocessing stage. Enriches person records — country-of-birth parsing and alias normalization — writing back to the `T_WC_TMDB_PERSON*` tables. Runs alongside `tmdb-movie-preprocess` and `keywords-processing` to prepare the `T_WC_T2S_*` read-model consumed by `fastapi-text2sql`.
-
----
+Preprocessing stage of **Agent BBB** (owner `vaugouin`; sibling roster in `%USERPROFILE%/Nestor/projets/t2s-backlog/topics/related-repositories.txt`). Derives country of birth and normalized aliases from the `T_WC_TMDB_PERSON*` tables filled by `tmdb-crawler`, and writes back there. `tmdb-movie-preprocess` (Process 51) reads `T_WC_TMDB_PERSON_ALSO_KNOWN_AS`.
 
 ## Where things live (file → role)
 
-Edit at the right layer; the architecture is intentionally split.
-
-- `tmdb-person-preprocess.py` : the pipeline itself, one block per process in
-  `arrprocessscope` (1 = COUNTRY_OF_BIRTH, 2 = ALSO_KNOWN_AS).
-- `citizenphil.py` : shared DB layer, also vendored into the sibling repos. A change
-  here is a stack-wide change: `f_sqlupdatearray` costs one `SELECT *` + one UPDATE +
-  one COMMIT per call, `f_sqlbulkupsert` collapses N rows into one statement. Prefer
-  the latter in any loop over more than a few hundred rows.
-- `migrations/*.py` : one-shot schema/data repairs, dry run by default, `--apply` to
-  act. Never invoked by the pipeline; run by hand, in a low-traffic window.
+- `tmdb-person-preprocess.py`: the pipeline, one block per process in `arrprocessscope` (1 = COUNTRY_OF_BIRTH, 2 = ALSO_KNOWN_AS).
+- `citizenphil.py`: shared DB layer, vendored into sibling repos; a change here is stack-wide. `f_sqlupdatearray` costs one `SELECT *` + UPDATE + COMMIT per call, `f_sqlbulkupsert` collapses N rows into one statement: prefer the latter in any loop over a few hundred rows.
+- `migrations/*.py`: one-shot repairs, dry run by default, `--apply` to act; never invoked by the pipeline (README § Migrations).
 
 ## Do not write TIM_UPDATED on T_WC_TMDB_PERSON
 
-`tmdb-crawler` fills its person refresh queue with
-`WHERE T_WC_TMDB_PERSON.TIM_UPDATED < <J-30>`. This preprocess derives
-`COUNTRY_OF_BIRTH*` from data it did not author, so stamping `TIM_UPDATED` on the
-rows it touches marks the whole table as freshly crawled and starves that queue.
-
-Concretely: the country-of-birth write goes through `f_sqlbulkupsert(...,
-intaddstdfields=0)`. Do not "fix" that 0 into a 1, and do not route the write back
-through `f_sqlupdatearray(..., 1)`.
-
-The same reasoning is why both processes are differential: they compare against the
-stored value and send only real changes. Reintroducing an unconditional rewrite turns
-a few-minute run back into a multi-hour one and, through `TIM_UPDATED`, breaks the
-crawler downstream.
+`tmdb-crawler` builds its person refresh queue from `TIM_UPDATED < <J-30>`; stamping it here starves that queue. The country-of-birth write goes through `f_sqlbulkupsert(..., intaddstdfields=0)`: do not "fix" that 0 into a 1, nor route it back through `f_sqlupdatearray(..., 1)`. Both passes stay differential (only real changes are sent); an unconditional rewrite turns minutes into hours and breaks the crawler through `TIM_UPDATED`.
 
 ## A differential pass must be a no-op on its second run
 
-Whatever you change in either pass, run the pipeline twice in a row with nothing else
-touching the database, and check the second run writes zero rows. A pass that writes on
-a database it has just converged is fighting itself, not reacting to a change.
+After any change to either pass, run the pipeline twice in a row with `-e PREPROCESS_FULL_PASS=1` and nothing else touching the database: the second run must write zero rows (command: README § The invariant to watch).
 
-The defect that made this rule explicit: aliases were matched with Python's `==` while
-the server holds one row per `(ID_PERSON, PERSON_NAME)` under `utf8mb4_unicode_ci`,
-which folds case and Latin diacritics. `Jean Reno` and `JEAN RENO` are one row, so the
-pass inserted the spelling it believed missing, the upsert imposed its `DISPLAY_ORDER`
-on the existing row, and the next run put the other spelling back. Roughly 26k writes
-per run with zero deletions, invisible in any single run's output.
+Alias convergence rests on two rules (reasoning: README § Alias matching happens under the server's collation). Never undo them:
 
-Two rules keep it convergent, neither of which requires reproducing the collation.
-`person_names.f_aliaskey` folds case and Latin diacritics, and an alias is looked up by
-its exact spelling first, by the folded key only as a fallback: a fold that is too
-aggressive then skips an insert rather than deleting a legitimate alias. And an insert
-never overwrites the row it lands on (`citizenphil.f_sqlbulkinsertnoclobber`), because a
-conflict here means the row is already owned by another alias, not that it is stale.
-
-That second rule is what actually closed it. The collation also folds hiragana against
-katakana and full-width against half-width; folding case alone only took the churn from
-26.5k writes per run to 6.7k. Trying to out-guess a collation is a losing game, removing
-the write that starts the flip-flop is not.
+- look an alias up by exact spelling first, by `person_names.f_aliaskey` only as a fallback;
+- an insert never overwrites the row it lands on (`citizenphil.f_sqlbulkinsertnoclobber`), never an upsert. Do not try to reproduce the collation in Python instead.
 
 ## Code conventions
 
-- **Hungarian notation** for variables (legacy style):
-  - `str` — strings (`strtablename`, `strapiversion`)
-  - `lng` — integers (`lngpage`, `lngrowsperpage`)
-  - `dbl` — floats (`dblavailableram`)
-  - `arr` — lists / arrays
-  - `int` — boolean-like flags (`intcleanupenabled`, `intentity`)
-- **Function naming**: public pipeline entry points use `f_` (`f_text2sql`, `f_entity_extraction`, `f_resolve_complex_question`, `f_answer_single_value`, `f_hello_world`); private helpers use `_` (`_call_chat_llm`, `_normalize_llm_model`).
-- **Docstrings**: Google-style on public functions.
-- **Error handling**: broad try/except with console logging; surface failures via the `error` response field and the `messages` trace. Database execution errors are not returned directly to clients — they go through the complex-question retry path when enabled.
-- **JSON serialization**: use `logs.decimal_serializer()` for `Decimal` and `datetime`.
+- **Hungarian notation** for variables (legacy): `str`, `lng` (integers), `dbl` (floats), `arr` (lists), `int` (boolean-like flags).
+- Function names: `f_` prefix (`f_countrylookup`, `f_aliaskey`); private helpers `_`.
+- Keep Markdown, JSON and logs UTF-8: they carry non-ASCII names; avoid operations that rewrite them with mojibake.
 
 ---
 
 ## The passes read incrementally: bump lngderivationversion when logic changes
 
-Each pass keeps a watermark (`...cobwatermark`, `...akawatermark`): persons whose
-`TIM_UPDATED` is below it have been processed. A run reads `[watermark, run start)` and
-moves the watermark only once the pass has finished, so a crash costs a repeat rather
-than a silent hole.
-
-That makes an incremental run blind to any change that did not move `TIM_UPDATED`,
-**including your own change to the derivation logic**. If you touch
-`clean_place_of_birth`, `f_countrylookup`, `guess_language_family`, `f_aliaskey` or
-`build_person_names`, bump `lngderivationversion`: the mismatch forces one full pass so
-the new logic reaches rows the watermark would otherwise skip forever. Forgetting is
-caught by the periodic full pass (`lngfullpassmaxagedays`, 7 days), just a week later.
-
-Consequence for the two-runs check above: pass `-e PREPROCESS_FULL_PASS=1`. Without it
-the second run reads almost nothing and proves almost nothing.
+Each pass reads only persons whose `TIM_UPDATED` moved past its watermark (README § Incremental reading), so it is blind to **your own change to the derivation logic**. If you touch `clean_place_of_birth`, `f_countrylookup`, `guess_language_family`, `f_aliaskey` or `build_person_names`, bump `lngderivationversion` to force one full pass. Forgetting is only caught a week later by `lngfullpassmaxagedays`.
 
 ## Database Schema Sources
 
-Full DDL lives under [doc/sql/](doc/sql/); do not duplicate table definitions here. Treat these files as reference-only unless the user explicitly asks for schema-doc edits.
-
-- [doc/sql/TMDb-tables.sql](doc/sql/TMDb-tables.sql) — upstream/source TMDb tables and reference tables.
-
----
+Reference DDL: [doc/sql/TMDb-tables.sql](doc/sql/TMDb-tables.sql). Do not duplicate table definitions elsewhere; edit it only when asked.
 
 ## SQL Object Naming Conventions
 
-- SQL table and column names are uppercase snake case, except legacy imported TMDb genre columns such as `id` and `name`.
-- Persistent tables use `T_WC_*`.
-- Text2SQL read-model tables use `T_WC_T2S_*`.
-- TMDb source/reference tables use `T_WC_TMDB_*`.
-- Wikidata tables use `T_WC_WIKIDATA_*`; staging tables use `STG_T_WC_WIKIDATA_*`.
-- Wikipedia tables use `T_WC_WIKIPEDIA_*`.
-- Join tables usually follow `T_WC_T2S_{PARENT}_{CHILD}`, for example `T_WC_T2S_MOVIE_GENRE`, `T_WC_T2S_PERSON_MOVIE`.
-- Primary keys are usually `ID_{ENTITY}` for entity tables, `ID_ROW` for generic/join rows, or a table-specific surrogate such as `ID_T2S_PERSON_MOVIE`.
-- Foreign keys reuse the referenced primary-key name, for example `ID_MOVIE`, `ID_PERSON`, `ID_GENRE`.
-- Date columns use `DAT_*`; datetime/timestamp columns use `TIM_*`.
-- Boolean-like flags use `IS_*` or legacy integer flags such as `DELETED`.
-- Ordering uses `DISPLAY_ORDER`.
-- Aggregate counters use `*_COUNT`.
-- Media paths use `*_PATH`.
-- Language-specific labels/titles often use suffixes such as `_FR`; generic language rows use `LANG`.
-- RapidFuzz/generated search columns use `*_NORM` and `*_KEY`; popularity tie-breakers commonly use `POPULARITY`.
-- Index names are mixed legacy style. Preserve existing style: simple `KEY COLUMN_NAME`, `IDX_*` for indexes, `UK_*` for unique keys, `FK_*` for foreign keys, and `ft_*` for FULLTEXT indexes.
-
----
-
-## Encoding
-
-Keep Markdown, prompt files, JSON config, and logs UTF-8. These files contain non-ASCII names and multilingual examples. Avoid editor or terminal operations that rewrite them with mojibake.
-
----
+- Tables and columns uppercase snake case (except legacy TMDb genre columns `id`, `name`). Prefixes: `T_WC_*` persistent, `T_WC_T2S_*` Text2SQL read model, `T_WC_TMDB_*`, `T_WC_WIKIDATA_*` (staging `STG_T_WC_WIKIDATA_*`), `T_WC_WIKIPEDIA_*`. Join tables `T_WC_T2S_{PARENT}_{CHILD}`.
+- Keys: `ID_{ENTITY}` for entities, `ID_ROW` for generic/join rows (or a surrogate like `ID_T2S_PERSON_MOVIE`); foreign keys reuse the referenced key name.
+- Columns: `DAT_*` dates, `TIM_*` datetimes, `IS_*` or legacy `DELETED` flags, `DISPLAY_ORDER`, `*_COUNT`, `*_PATH`, `_FR`-style language suffixes (generic rows use `LANG`), `*_NORM` / `*_KEY` for RapidFuzz columns, `POPULARITY` as tie-breaker.
+- Indexes: preserve the mixed legacy style (`KEY COLUMN_NAME`, `IDX_*`, `UK_*`, `FK_*`, `ft_*` for FULLTEXT).
 
 ## Build & deployment (Docker)
 
-This preprocessor is built and run as a Docker container via the repo's root `Dockerfile`. The image is based on `python:3.10.5-slim-buster`, installs `requirements.txt`, copies the repo into `/app`, and runs `python ./tmdb-person-preprocess.py` as its `CMD`. Pass database credentials at runtime (e.g. `docker run --env-file ...`); do not bake secrets into the image.
+See README § Running with Docker and the `Dockerfile`. Pass credentials at runtime (`--env-file`), never bake secrets into the image.
 
 ---
 
-**Last Updated**: 2026-10-25
-**Current Version**: 1.0.4 
+**Last Updated**: 2026-10-31
+**Current Version**: 1.0.5 
 
 ## Backlog (Nestor second-brain)
 
-The prioritized, agent-ready implementation backlog for this repo lives in the **Nestor**
-knowledge repo (a separate repo, not cloned alongside this one):
-
-- This repo: `C:\Users\vaugo\Nestor\projets\t2s-backlog\repos\tmdb-person-preprocess.md`
-- Cross-repo dashboard: `C:\Users\vaugo\Nestor\projets\t2s-backlog\index.md`
-
-Consult it before implementing: tasks are `TMDB-PERSON-PREPROCESS-NNN` with status (done / in-progress /
-todo), priority, and quick-wins. NOTE: these are local paths on Philippe's PC and do not
-resolve on the VPS or on cloud agents (claude.ai/code).
+Tasks `TMDB-PERSON-PREPROCESS-NNN` (status, priority, quick wins) live in the Nestor repo; consult before implementing: `C:\Users\vaugo\Nestor\projets\t2s-backlog\repos\tmdb-person-preprocess.md` (dashboard: `...\t2s-backlog\index.md`). These paths exist only on Philippe's PC, not on the VPS or cloud agents.
 
 ## SQL files live in `doc/sql/`
 
-Stack-wide convention, set 2026-08-20. Every **read-only** `.sql` of this repo, audit
-queries, monitoring queries, exports, reference DDL dumps, lives in `doc/sql/`, never
-at the root and never in a `doc/queries/` of its own.
-
-Two deliberate exceptions, and they are the reason the rule is worded around reading
-rather than around file type. A `.sql` **executed by code** stays where the code expects
-it, because moving it breaks a run silently. And a `.sql` that **writes** (migration,
-seed, `DELETE` cleanup) stays put too: it belongs to a procedure, not to documentation.
-When in doubt, ask whether running the file twice by accident would change the database.
-If yes, it is not a `doc/sql/` file.
+Stack-wide convention (2026-08-20). Every **read-only** `.sql` (audit, monitoring, exports, reference DDL) lives in `doc/sql/`, never at the root nor in a `doc/queries/`. Exceptions: a `.sql` **executed by code** stays where the code expects it (moving it breaks a run silently), and a `.sql` that **writes** (migration, seed, cleanup) stays with its procedure. Test: if running it twice by accident would change the database, it is not a `doc/sql/` file.
