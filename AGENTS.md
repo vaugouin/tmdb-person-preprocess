@@ -1,5 +1,9 @@
 # AGENTS.md - Agent Guide for TMDb Person Preprocess
 
+## Canary
+
+Start every reply with "Philippe,": no exceptions, including short replies and tool summaries.
+
 Rules an agent needs to work on this codebase safely. Docker usage, secrets, server variables, migrations and the reasoning behind the write behaviour live in @README.md, which is canonical: update it for any user-facing change, and update this file only when agent workflow or safety context changes. `CLAUDE.md` and any other tool-specific file only point here.
 
 ---
@@ -57,7 +61,7 @@ See README § Running with Docker and the `Dockerfile`. Pass credentials at runt
 ---
 
 **Last Updated**: 2026-10-31
-**Current Version**: 1.0.6 
+**Current Version**: 1.0.7 
 
 ## Backlog (Nestor second-brain)
 
