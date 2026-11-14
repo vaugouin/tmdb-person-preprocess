@@ -42,6 +42,9 @@ For a place whose country today is C, born on day D:
    that applies gives COUNTRY_CODE_AT_BIRTH. NULL there means "not known from the country
    alone": write nothing. A region-specific row covering D when the place's region is
    unknown: write nothing.
+   A country whose regions matter (Germany 1945-1990, Italy before 1920) ends with a
+   row without region and without country: a place whose region is not identified
+   falls on it and is not written.
 2. no row: C itself when DAT_START of C is NULL or <= D, otherwise nothing (C did not
    exist yet, and the country of the time is not in the table).
 
@@ -227,6 +230,13 @@ PLACE_NAMES = {
 # (country today, country at birth or None = unknown, start, end, region QIDs or None, note)
 # Rows of one country are tried in this order; region rows first.
 EAST_LANDER = 'Q1202,Q1205,Q1208,Q1206,Q1196'   # Saxony, Thuringia, Brandenburg, Saxony-Anhalt, M-V
+# Baden-Wurttemberg, Bavaria, Hamburg, Schleswig-Holstein, Lower Saxony, Hesse, North Rhine-Westphalia,
+# Rhineland-Palatinate, Bremen (Saarland joined on 1957-01-01, its own row)
+WEST_LANDER = 'Q985,Q980,Q1055,Q1194,Q1197,Q1199,Q1198,Q1200,Q1209'
+# The eighteen regions of Italy that were Italian before 1918 (all but Trentino-South Tyrol
+# and Friuli-Venezia Giulia)
+IT_OTHER_REGIONS = ('Q1216,Q1210,Q1256,Q1243,Q1279,Q1452,Q1263,Q1280,Q1273,Q1282,Q1284,Q1438,Q1443,'
+                    'Q1447,Q1458,Q1460,Q1462,Q1222')
 WWII_YU = 'Axis occupation and partition of Yugoslavia, 1941-04-06 to 1945-05-08: not written'
 ISTRIA = 'Istria, Rijeka, Zadar and the Slovene Littoral were Italian 1920-1947: not separated yet'
 SUCCESSION = [
@@ -287,10 +297,15 @@ SUCCESSION = [
     ('FI', 'QO', '1809-09-17', '1917-12-05', None, 'Grand Duchy of Finland'),
     # Germany
     ('DE', None, '1945-05-08', '1990-10-02', 'Q64', 'Berlin: East or West not known from the Land'),
-    ('DE', None, '1947-01-01', '1956-12-31', 'Q1201', 'Saar Protectorate'),
+    ('DE', None, '1945-05-08', '1956-12-31', 'Q1201', 'French zone, then Saar Protectorate'),
     ('DE', None, '1945-05-08', '1949-10-06', EAST_LANDER, 'Soviet occupation zone'),
     ('DE', 'XG', '1949-10-07', '1990-10-02', EAST_LANDER, None),
-    ('DE', 'QP', '1949-05-23', '1990-10-02', None, None),
+    ('DE', 'QP', '1949-05-23', '1990-10-02', WEST_LANDER, None),
+    ('DE', 'QP', '1957-01-01', '1990-10-02', 'Q1201', 'Saarland'),
+    # Last, for every place whose Land is not identified: East or West cannot be told. A
+    # place's P131 chain is often incomplete (Nordhausen: its link to Thuringia deprecated,
+    # its district without a P131 in the database), so West is never the default.
+    ('DE', None, '1945-05-08', '1990-10-02', None, 'Land not identified: East or West not known'),
     # Austria, Hungary, Poland, Romania, Italy: borders of 1918-1920 and 1938-1945
     ('AT', 'QM', '1867-03-30', '1918-10-30', None, None),
     ('AT', None, '1938-03-13', '1945-04-26', None, 'Anschluss'),
@@ -301,6 +316,8 @@ SUCCESSION = [
     ('RO', None, '1000-01-01', '1920-06-04', None, 'Transylvania and Bukovina were Austro-Hungarian'),
     ('RO', None, '1940-08-30', '1944-10-25', None, 'Northern Transylvania was Hungarian'),
     ('IT', None, '1000-01-01', '1920-11-12', 'Q1237,Q1250', 'Trentino-South Tyrol, Friuli-Venezia Giulia: Austro-Hungarian'),
+    ('IT', 'IT', '1870-09-20', '1920-11-12', IT_OTHER_REGIONS, 'Italy of 1870-1920, the other eighteen regions'),
+    ('IT', None, '1000-01-01', '1920-11-12', None, 'Region not identified, or before the capture of Rome in 1870'),
     # Renamed
     ('MM', 'BU', '1948-01-04', '1989-06-17', None, None),
     ('CD', 'ZR', '1971-10-27', '1997-05-16', None, None),
