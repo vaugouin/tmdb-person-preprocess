@@ -493,6 +493,53 @@ CREATE TABLE `T_WC_TMDB_ID_NOT_FOUND` (
 /*!40101 SET character_set_client = @saved_cs_client */;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!40101 SET character_set_client = utf8 */;
+CREATE TABLE `T_WC_TMDB_IMAGE_CAPTION` (
+  `ID_IMAGE_CAPTION` bigint(20) NOT NULL AUTO_INCREMENT,
+  `TABLE_SOURCE` varchar(16) NOT NULL COMMENT 'movie | serie | season | episode | ...',
+  `ID_ROW` bigint(20) NOT NULL COMMENT 'ID_ROW de la ligne T_WC_TMDB_*_IMAGE source',
+  `ID_ENTITY` bigint(20) NOT NULL COMMENT 'ID_MOVIE, ID_SERIE, ... selon TABLE_SOURCE',
+  `IMAGE_PATH` varchar(255) NOT NULL COMMENT 'chemin TMDb, ex. /abc.jpg',
+  `CAPTION` text NOT NULL COMMENT 'phrase descriptive ancrée',
+  `CAPTION_MODEL` varchar(64) NOT NULL COMMENT 'ex. claude-sonnet-5-5',
+  `TIMELINE_START_MIN` smallint(6) DEFAULT NULL COMMENT 'début estimé du plan dans le film, en minutes (NULL : non placé, ex. visuel promotionnel)',
+  `TIMELINE_END_MIN` smallint(6) DEFAULT NULL COMMENT 'fin estimée de l''intervalle, en minutes',
+  `TIMELINE_ORDER` smallint(6) DEFAULT NULL COMMENT 'rang chronologique estimé parmi les images placées du film (1 = première)',
+  `TIMELINE_MODEL` varchar(64) DEFAULT NULL COMMENT 'modèle qui a estimé la chronologie',
+  `TIM_CREATED` timestamp NOT NULL DEFAULT current_timestamp(),
+  `TIM_UPDATED` timestamp NULL DEFAULT NULL ON UPDATE current_timestamp(),
+  PRIMARY KEY (`ID_IMAGE_CAPTION`),
+  UNIQUE KEY `UK_IMAGE_CAPTION` (`TABLE_SOURCE`,`ID_ROW`,`CAPTION_MODEL`),
+  KEY `ID_ENTITY` (`ID_ENTITY`),
+  KEY `TABLE_SOURCE` (`TABLE_SOURCE`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8 */;
+CREATE TABLE `T_WC_TMDB_IMAGE_CAPTION_REVIEW` (
+  `ID_IMAGE_CAPTION_REVIEW` bigint(20) NOT NULL AUTO_INCREMENT,
+  `EXPERIMENT` varchar(64) NOT NULL COMMENT 'ex. ab-context-20261025',
+  `TABLE_SOURCE` varchar(16) NOT NULL COMMENT 'movie | serie | season | episode | ...',
+  `ID_ROW` bigint(20) NOT NULL COMMENT 'ID_ROW de la ligne T_WC_TMDB_*_IMAGE source',
+  `ID_ENTITY` bigint(20) NOT NULL COMMENT 'ID_MOVIE, ID_SERIE, ... selon TABLE_SOURCE',
+  `IMAGE_PATH` varchar(255) NOT NULL COMMENT 'chemin TMDb, ex. /abc.jpg',
+  `CAPTION_MODEL` varchar(64) NOT NULL COMMENT 'modèle des captions jugées',
+  `VARIANT_A` varchar(128) NOT NULL COMMENT 'variante A (ou unique), ex. full: 25 cast lines, whole plot',
+  `CAPTION_A` text NOT NULL,
+  `VARIANT_B` varchar(128) DEFAULT NULL,
+  `CAPTION_B` text DEFAULT NULL,
+  `VERDICT` varchar(16) NOT NULL COMMENT 'A | B | EQUAL | BOTH_WRONG | OK | WRONG',
+  `REVIEW_COMMENT` text DEFAULT NULL COMMENT 'remarque libre du relecteur',
+  `REVIEWER` varchar(32) NOT NULL COMMENT 'ex. vaugouin',
+  `TIM_CREATED` timestamp NOT NULL DEFAULT current_timestamp(),
+  `TIM_UPDATED` timestamp NULL DEFAULT NULL ON UPDATE current_timestamp(),
+  PRIMARY KEY (`ID_IMAGE_CAPTION_REVIEW`),
+  UNIQUE KEY `UK_IMAGE_CAPTION_REVIEW` (`EXPERIMENT`,`TABLE_SOURCE`,`ID_ROW`,`REVIEWER`),
+  KEY `ID_ENTITY` (`ID_ENTITY`),
+  KEY `VERDICT` (`VERDICT`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8 */;
 CREATE TABLE `T_WC_TMDB_KEYWORD` (
   `ID_KEYWORD` int(11) NOT NULL,
   `NAME` varchar(250) DEFAULT NULL,
@@ -798,6 +845,10 @@ CREATE TABLE `T_WC_TMDB_MOVIE` (
   `SOUND_TECHNOLOGY` varchar(200) DEFAULT NULL,
   `TIM_RELEASE_DATES_COMPLETED` datetime DEFAULT NULL,
   `TIM_WATCH_PROVIDERS_COMPLETED` datetime DEFAULT NULL,
+  `FACEBOOK_ID` varchar(100) DEFAULT NULL,
+  `INSTAGRAM_ID` varchar(100) DEFAULT NULL,
+  `TWITTER_ID` varchar(100) DEFAULT NULL,
+  `TIM_EXTERNAL_IDS` datetime DEFAULT NULL,
   PRIMARY KEY (`ID_MOVIE`),
   KEY `DELETED` (`DELETED`),
   KEY `DISPLAY_ORDER` (`DISPLAY_ORDER`),
@@ -1462,6 +1513,13 @@ CREATE TABLE `T_WC_TMDB_PERSON` (
   `TIM_WIKIDATA_COMPLETED` datetime DEFAULT NULL,
   `TIM_IMAGES_COMPLETED` datetime DEFAULT NULL,
   `USED_FOR_SIMILARITY` int(5) DEFAULT NULL,
+  `FACEBOOK_ID` varchar(100) DEFAULT NULL,
+  `INSTAGRAM_ID` varchar(100) DEFAULT NULL,
+  `TWITTER_ID` varchar(100) DEFAULT NULL,
+  `TIKTOK_ID` varchar(100) DEFAULT NULL,
+  `YOUTUBE_ID` varchar(100) DEFAULT NULL,
+  `TIM_EXTERNAL_IDS` datetime DEFAULT NULL,
+  `COUNTRY_OF_BIRTH_HISTORIC` varchar(10) DEFAULT NULL,
   PRIMARY KEY (`ID_PERSON`),
   KEY `DELETED` (`DELETED`),
   KEY `DISPLAY_ORDER` (`DISPLAY_ORDER`),
@@ -2317,6 +2375,10 @@ CREATE TABLE `T_WC_TMDB_SERIE` (
   `LAST_EPISODE_NUMBER` int(5) DEFAULT NULL,
   `TIM_LAST_CHANGES_CHECK` datetime DEFAULT NULL,
   `TIM_WATCH_PROVIDERS_COMPLETED` datetime DEFAULT NULL,
+  `FACEBOOK_ID` varchar(100) DEFAULT NULL,
+  `INSTAGRAM_ID` varchar(100) DEFAULT NULL,
+  `TWITTER_ID` varchar(100) DEFAULT NULL,
+  `TIM_EXTERNAL_IDS` datetime DEFAULT NULL,
   PRIMARY KEY (`ID_SERIE`),
   KEY `DELETED` (`DELETED`),
   KEY `DISPLAY_ORDER` (`DISPLAY_ORDER`),
