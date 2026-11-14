@@ -237,6 +237,10 @@ WEST_LANDER = 'Q985,Q980,Q1055,Q1194,Q1197,Q1199,Q1198,Q1200,Q1209'
 # and Friuli-Venezia Giulia)
 IT_OTHER_REGIONS = ('Q1216,Q1210,Q1256,Q1243,Q1279,Q1452,Q1263,Q1280,Q1273,Q1282,Q1284,Q1438,Q1443,'
                     'Q1447,Q1458,Q1460,Q1462,Q1222')
+# Kingdom of Italy, 1861-03-17: all of them but Veneto (Austrian until 1866) and Lazio (Papal
+# until 1870-09-20). Livorno 1863 is 'Livorno, Italy' (Pietro Mascagni, found by the dry run).
+IT_1866_REGIONS = ','.join(q for q in IT_OTHER_REGIONS.split(',') if q != 'Q1282')
+IT_1861_REGIONS = ','.join(q for q in IT_1866_REGIONS.split(',') if q != 'Q1243')
 WWII_YU = 'Axis occupation and partition of Yugoslavia, 1941-04-06 to 1945-05-08: not written'
 ISTRIA = 'Istria, Rijeka, Zadar and the Slovene Littoral were Italian 1920-1947: not separated yet'
 SUCCESSION = [
@@ -317,7 +321,9 @@ SUCCESSION = [
     ('RO', None, '1940-08-30', '1944-10-25', None, 'Northern Transylvania was Hungarian'),
     ('IT', None, '1000-01-01', '1920-11-12', 'Q1237,Q1250', 'Trentino-South Tyrol, Friuli-Venezia Giulia: Austro-Hungarian'),
     ('IT', 'IT', '1870-09-20', '1920-11-12', IT_OTHER_REGIONS, 'Italy of 1870-1920, the other eighteen regions'),
-    ('IT', None, '1000-01-01', '1920-11-12', None, 'Region not identified, or before the capture of Rome in 1870'),
+    ('IT', 'IT', '1866-10-19', '1870-09-19', IT_1866_REGIONS, 'Kingdom of Italy before the capture of Rome (Lazio not yet)'),
+    ('IT', 'IT', '1861-03-17', '1866-10-18', IT_1861_REGIONS, 'Kingdom of Italy before Veneto (1866) and Lazio (1870)'),
+    ('IT', None, '1000-01-01', '1920-11-12', None, 'Region not identified, or not yet Italian (before 1861, Veneto before 1866, Lazio before 1870)'),
     # Renamed
     ('MM', 'BU', '1948-01-04', '1989-06-17', None, None),
     ('CD', 'ZR', '1971-10-27', '1997-05-16', None, None),
