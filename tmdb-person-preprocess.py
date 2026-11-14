@@ -72,7 +72,8 @@ lngakapersonchunksize: int = 1000   # ALSO_KNOWN_AS: ALSO_KNOWN_AS is a mediumte
 # with the stored value forces one full pass, so new logic reaches the rows a watermark
 # would otherwise skip forever. Forgetting to bump it is caught by the periodic full
 # pass below, just later.
-lngderivationversion: int = 1
+# 2 (2026-11-14): COUNTRY_OF_BIRTH_HISTORIC, the defunct country the place names.
+lngderivationversion: int = 2
 
 # A full pass is forced when the last one is this old. It is the safety net for
 # everything TIM_UPDATED cannot see: a T_WC_COUNTRY row edited by hand, an alias
@@ -424,6 +425,49 @@ Input: {input_str}"""
     # If we get here, all retries failed
     return ""
 
+historic_lookup_dict: Dict[str, str] = {}
+
+def initialize_historic_lookup():
+    """Load the defunct countries of T_WC_COUNTRY (IS_DEFUNCT = 1) into historic_lookup_dict.
+
+    Every name of such a country (English, French, the spelling TMDb places use, the
+    aliases) maps to its code: SU, XC, YU, XG, QM (Austria-Hungary)... They are rows with
+    DELETED = 1, so initialize_country_lookup(), which reads DELETED = 0, never maps a
+    place to them: COUNTRY_OF_BIRTH stays today's country. The table and its codes come
+    from migrations/add_defunct_countries.py.
+    """
+    historic_lookup_dict.clear()
+    cursor2 = cp.connectioncp.cursor()
+    cursor2.execute(
+        "SELECT COUNTRY_CODE, COUNTRY_NAME_EN, COUNTRY_NAME_FR, PLACE_NAME_EN, COUNTRY_ALIASES "
+        "FROM T_WC_COUNTRY WHERE IS_DEFUNCT = 1 AND COUNTRY_CODE IS NOT NULL ORDER BY COUNTRY_CODE ASC"
+    )
+    for row2 in cursor2.fetchall():
+        arrnames = [row2['COUNTRY_NAME_EN'], row2['COUNTRY_NAME_FR'], row2['PLACE_NAME_EN']]
+        arrnames += (row2['COUNTRY_ALIASES'] or '').split('|')
+        for strname in arrnames:
+            if strname and strname.strip():
+                historic_lookup_dict.setdefault(normalize_string(strname), row2['COUNTRY_CODE'].upper())
+    cursor2.close()
+    print(f"Historic country lookup initialized with {len(historic_lookup_dict)} entries")
+
+def f_historiccountry(text):
+    """Code of the defunct country a place of birth names, '' when it names none.
+
+    TMDb writes the place as it was at the birth, today's name in brackets
+    ("Brno, Czechoslovakia [now Czech Republic]", "Moscow, USSR (Russia)"). The part in
+    brackets or parentheses is dropped, then the components are read from the last one
+    back: "Riga, Latvian SSR, USSR" gives SU, "Brno, Moravia, Austria-Hungary" gives QM.
+    """
+    if not isinstance(text, str):
+        return ''
+    text = re.sub(r'\[[^\]]*\]?|\([^)]*\)?', ' ', text.lower())
+    for strpart in reversed(re.split(r',| - ', text)):
+        strpart = normalize_string(strpart).rstrip('.').strip()
+        if strpart in historic_lookup_dict:
+            return historic_lookup_dict[strpart]
+    return ''
+
 def safe_transform(text, transform_func):
     """Safely apply a transformation function with error handling"""
     try:
@@ -578,13 +622,16 @@ def batch_update_data_country_of_birth(connection, df, batch_size=500):
     for row in df.itertuples(index=False):
         strlong = process_value(row.COUNTRY_OF_BIRTH_LONG)[:200]
         strcode = process_value(row.COUNTRY_OF_BIRTH)[:10]
+        strhistoric = process_value(row.COUNTRY_OF_BIRTH_HISTORIC)[:10]
         if (f_samestoredvalue(row.COUNTRY_OF_BIRTH_LONG_DB, strlong)
-                and f_samestoredvalue(row.COUNTRY_OF_BIRTH_DB, strcode)):
+                and f_samestoredvalue(row.COUNTRY_OF_BIRTH_DB, strcode)
+                and f_samestoredvalue(row.COUNTRY_OF_BIRTH_HISTORIC_DB, strhistoric)):
             continue
         arrchanged.append({
             "ID_PERSON": int(row.ID_PERSON),
             "COUNTRY_OF_BIRTH_LONG": strlong,
             "COUNTRY_OF_BIRTH": strcode,
+            "COUNTRY_OF_BIRTH_HISTORIC": strhistoric,
         })
 
     if not arrchanged:
@@ -647,6 +694,7 @@ try:
 
                     # Initialize the lookup dictionary
                     initialize_country_lookup()
+                    initialize_historic_lookup()
 
                     try:
                         # clean_place_of_birth() and f_countrylookup() are pure functions
@@ -655,6 +703,7 @@ try:
                         # 4.3M parses + lookups into one per distinct value per run.
                         arrcleancache = {}
                         arrcountrycache = {}
+                        arrhistoriccache = {}
 
                         strlasttim = f_readwatermark("strtmdbpersonpreprocesscobwatermark", intfullpass)
                         lnglastid = 0
@@ -682,7 +731,8 @@ try:
                                 cursor2.execute(
                                     "SELECT ID_PERSON, PLACE_OF_BIRTH, "
                                     "COUNTRY_OF_BIRTH_LONG AS COUNTRY_OF_BIRTH_LONG_DB, "
-                                    "COUNTRY_OF_BIRTH AS COUNTRY_OF_BIRTH_DB "
+                                    "COUNTRY_OF_BIRTH AS COUNTRY_OF_BIRTH_DB, "
+                                    "COUNTRY_OF_BIRTH_HISTORIC AS COUNTRY_OF_BIRTH_HISTORIC_DB "
                                     "FROM T_WC_TMDB_PERSON "
                                     "WHERE ID_PERSON > %s "
                                     "AND PLACE_OF_BIRTH IS NOT NULL AND PLACE_OF_BIRTH <> '' "
@@ -694,7 +744,8 @@ try:
                                 cursor2.execute(
                                     "SELECT ID_PERSON, PLACE_OF_BIRTH, TIM_UPDATED, "
                                     "COUNTRY_OF_BIRTH_LONG AS COUNTRY_OF_BIRTH_LONG_DB, "
-                                    "COUNTRY_OF_BIRTH AS COUNTRY_OF_BIRTH_DB "
+                                    "COUNTRY_OF_BIRTH AS COUNTRY_OF_BIRTH_DB, "
+                                    "COUNTRY_OF_BIRTH_HISTORIC AS COUNTRY_OF_BIRTH_HISTORIC_DB "
                                     "FROM T_WC_TMDB_PERSON "
                                     "WHERE (TIM_UPDATED > %s OR (TIM_UPDATED = %s AND ID_PERSON > %s)) "
                                     "AND TIM_UPDATED < %s "
@@ -714,11 +765,14 @@ try:
                             for strplace in data['PLACE_OF_BIRTH'].unique():
                                 if strplace in arrcleancache:
                                     continue
+                                arrhistoriccache[strplace] = f_historiccountry(strplace)
                                 strclean = clean_place_of_birth(strplace)
                                 arrcleancache[strplace] = strclean
                                 if strclean not in arrcountrycache:
                                     arrcountrycache[strclean] = f_countrylookup(strclean)
 
+                            # Read from the full text, before the cleaning keeps only its last part.
+                            data['COUNTRY_OF_BIRTH_HISTORIC'] = data['PLACE_OF_BIRTH'].map(arrhistoriccache)
                             data['PLACE_OF_BIRTH'] = data['PLACE_OF_BIRTH'].map(arrcleancache)
                             data['COUNTRY_OF_BIRTH_LONG'] = data['PLACE_OF_BIRTH']
                             data['COUNTRY_OF_BIRTH'] = data['PLACE_OF_BIRTH'].map(arrcountrycache)

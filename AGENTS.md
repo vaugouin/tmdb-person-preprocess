@@ -43,6 +43,10 @@ Alias convergence rests on two rules (reasoning: README § Alias matching happen
 
 Each pass reads only persons whose `TIM_UPDATED` moved past its watermark (README § Incremental reading), so it is blind to **your own change to the derivation logic**. If you touch `clean_place_of_birth`, `f_countrylookup`, `guess_language_family`, `f_aliaskey` or `build_person_names`, bump `lngderivationversion` to force one full pass. Forgetting is only caught a week later by `lngfullpassmaxagedays`.
 
+## Defunct countries are reference data shared with selenium-tmdb
+
+`T_WC_COUNTRY` rows with `IS_DEFUNCT = 1` (kept `DELETED = 1`) and `T_WC_COUNTRY_SUCCESSION` are owned by `migrations/add_defunct_countries.py`: edit its lists and re-run it, never the tables by hand (it empties and refills the succession table). `selenium-tmdb` reads them to write places of birth on TMDb as they were at the birth; a change here changes what it writes. Never set `DELETED = 0` on a defunct row: the country-of-birth lookup would then map places to it, and `tmdb-front` would offer it as a watch country.
+
 ## Database Schema Sources
 
 Reference DDL: [doc/sql/TMDb-tables.sql](doc/sql/TMDb-tables.sql). Do not duplicate table definitions elsewhere; edit it only when asked.
@@ -60,8 +64,8 @@ See README § Running with Docker and the `Dockerfile`. Pass credentials at runt
 
 ---
 
-**Last Updated**: 2026-10-31
-**Current Version**: 1.0.7 
+**Last Updated**: 2026-11-14
+**Current Version**: 1.0.8 
 
 ## Backlog (Nestor second-brain)
 

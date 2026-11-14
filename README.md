@@ -72,6 +72,30 @@ The wrapper script [`tmdb-person-preprocess.sh`](tmdb-person-preprocess.sh) perf
 
 ---
 
+## Country of birth: today's country, and the country of the time
+
+The country-of-birth process derives two codes from `PLACE_OF_BIRTH`:
+
+- `COUNTRY_OF_BIRTH`: the country the place is in **today** (ISO 3166-1 alpha-2), read
+  from the last part of the text, the `[now ...]` part first. "Brno, Czechoslovakia [now
+  Czech Republic]" gives `CZ`; a place that names only a split country ("USSR",
+  "Czechoslovakia") gives `''`.
+- `COUNTRY_OF_BIRTH_HISTORIC` (since 1.0.8, 2026-11-14): the **defunct country** the text
+  names, `''` when it names none. "Moscow, RSFSR, USSR" gives `SU`, "Brno, Moravia,
+  Austria-Hungary [now Czech Republic]" gives `QM`. On 2026-11-14, 23,721 persons named one.
+
+TMDb's rule is that the place is written as it was at the birth, with the current name in
+brackets ([People Bible](https://www.themoviedb.org/bible/people), Place of Birth). The
+defunct countries are rows of `T_WC_COUNTRY` with `IS_DEFUNCT = 1` and `DELETED = 1`,
+created by [`migrations/add_defunct_countries.py`](migrations/add_defunct_countries.py),
+which also fills `T_WC_COUNTRY_SUCCESSION` (the country a place of today's country was in,
+by date). `DELETED = 1` keeps them out of the `COUNTRY_OF_BIRTH` lookup, which reads only
+live rows. Their codes are TMDb's (`SU`, `XC`, `YU`, `XG`, `CS`, `AN`, `BU`, `ZR`, `TP`,
+also used by its production countries), or `QM`-`QZ` when TMDb has none (`QM`
+Austria-Hungary, `QO` Russian Empire, `QP` West Germany, `QS` Protectorate of Bohemia and
+Moravia). `selenium-tmdb`, which writes places of birth on TMDb, reads the same two tables:
+add a defunct country or a spelling there (the migration's lists), not in the code.
+
 ## Write behaviour and monitoring
 
 Both processes are **differential**: they read what the table already holds, compute
@@ -81,7 +105,7 @@ dominated by the read, not by the write.
 
 ### TIM_UPDATED on `T_WC_TMDB_PERSON` is deliberately not written
 
-`COUNTRY_OF_BIRTH` and `COUNTRY_OF_BIRTH_LONG` are derived columns, so the
+`COUNTRY_OF_BIRTH`, `COUNTRY_OF_BIRTH_LONG` and `COUNTRY_OF_BIRTH_HISTORIC` are derived columns, so the
 country-of-birth process updates them without touching `TIM_UPDATED`.
 
 This matters beyond this repository: `tmdb-crawler` builds its person refresh queue
@@ -158,6 +182,7 @@ kill the job halfway.
 | Script | What it repairs | Status |
 | --- | --- | --- |
 | [`add_unique_person_alias_key.py`](migrations/add_unique_person_alias_key.py) | Deduplicates `T_WC_TMDB_PERSON_ALSO_KNOWN_AS` on `(ID_PERSON, PERSON_NAME)` and adds the missing `UNIQUE` key, so duplicate aliases cannot come back | Applied 2026-08-28 (729 groups, 737 rows removed) |
+| [`add_defunct_countries.py`](migrations/add_defunct_countries.py) | Adds the defunct countries to `T_WC_COUNTRY` (`IS_DEFUNCT`, `DAT_START`, `DAT_END`, `PLACE_NAME_EN`, `ID_WIKIDATA`), creates `T_WC_COUNTRY_SUCCESSION` and `T_WC_TMDB_PERSON.COUNTRY_OF_BIRTH_HISTORIC` (instant `ALTER`, `TIM_UPDATED` untouched). Re-run it after editing its lists | Applied 2026-11-14 (13 defunct countries, 68 succession rows) |
 | [`clear_none_place_of_birth.py`](migrations/clear_none_place_of_birth.py) | Turns the literal text `"None"` back into SQL `NULL` in `PLACE_OF_BIRTH` and `COUNTRY_OF_BIRTH_LONG` | Run **after** the `tmdb-crawler` fix is deployed |
 | [`reclassify_arabic_script_families.py`](migrations/reclassify_arabic_script_families.py) | Re-runs the language-family guess on the aliases filed as `Arabic` in `T_WC_TMDB_PERSON_ALSO_KNOWN_AS` and moves to `Persian` or `Urdu` those carrying a letter specific to them (TMDB-PERSON-PREPROCESS-007) | Not recorded in the script |
 | [`keep_marks_in_alias_norm.py`](migrations/keep_marks_in_alias_norm.py) | Adds `\p{M}` to the class of the generated `PERSON_NAME_NORM` (and rebuilds `PERSON_NAME_KEY`) of `T_WC_TMDB_PERSON_ALSO_KNOWN_AS`, so the vowel signs of Devanagari, Thai, Kannada and the other abugidas stop turning into spaces (TMDB-PERSON-PREPROCESS-008). Full table rebuild: time it first with `--rehearse`, which runs the `ALTER` on a throw-away copy. Switch off `tmdb-movie-preprocess` too, its Process 51 reads this table | To run; then `tmdb-movie-preprocess` Process 51 and an API restart |
