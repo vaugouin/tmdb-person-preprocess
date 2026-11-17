@@ -10,7 +10,7 @@ Rules an agent needs to work on this codebase safely. Docker usage, secrets, ser
 
 ## Related repositories (project ecosystem)
 
-Preprocessing stage of **Agent BBB** (owner `vaugouin`; sibling roster in `%USERPROFILE%/Nestor/projets/t2s-backlog/topics/related-repositories.txt`). Derives country of birth and normalized aliases from the `T_WC_TMDB_PERSON*` tables filled by `tmdb-crawler`, and writes back there. `tmdb-movie-preprocess` (Process 51) reads `T_WC_TMDB_PERSON_ALSO_KNOWN_AS`.
+Preprocessing stage of **Cinephile App** (owner `vaugouin`; sibling roster in `%USERPROFILE%/Nestor/projets/t2s-backlog/topics/related-repositories.txt`). Derives country of birth and normalized aliases from the `T_WC_TMDB_PERSON*` tables filled by `tmdb-crawler`, and writes back there. `tmdb-movie-preprocess` (Process 51) reads `T_WC_TMDB_PERSON_ALSO_KNOWN_AS`.
 
 ## Where things live (file → role)
 
